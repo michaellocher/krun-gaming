@@ -15,13 +15,22 @@ Proton under FEX, DXVK/vkd3d-proton on Venus → KosmicKrisp → Metal. Details 
 - **D3D11**: Banished at 60 fps (display rate), 2560x1440, menu and gameplay; host ~62 % CPU, 3.2 GB.
 - **D3D12**: vkd3d-proton v3.1 test suite 544/588 without a failed check, host stable; stream output (transform feedback) captured
   (all stream-output tests pass); InfraSpace (Unity, `-force-d3d12`) renders its menus.
+- **Shared textures between processes** (Wine's D3DKMT shared resources, e.g. Media Foundation video): InfraSpace's
+  intro video after "Start Game" plays (moving frames and subtitles, D3D11 default mode; was black). Exportable
+  device-local memory is shared as KosmicKrisp's MTLHeap inside the host process (`host-patches/virglrenderer/0004`),
+  and our own guest Venus driver allows optimal-tiled opaque-fd images (`guest-patches/mesa/0001`).
+  `host-tests/share-image.c`: export → import → copy gives the cleared colour, in one process and across two.
+- `setup.sh` builds that Venus driver from the host's Mesa commit for aarch64, x86_64 and i686 (cross-compiled,
+  architecture and glibc checked), installs it with the share-image self-test (Fedora's driver back on failure), and
+  every session start puts it back if a package update replaced it.
 - Keyboard and absolute mouse (virtio-input); one cursor (gamescope's).
 - Sound: virtio-snd → CoreAudio, PipeWire in the guest; plays on the Mac's default output device.
 
 ### Own patches
 
 Listed in [NOTICE](NOTICE.md): kernel (virtio-gpu modifiers and blobs, config: HZ=1000 + preemption), libkrun
-(virtio-snd CoreAudio backend), virglrenderer (linear features, shm import, shared fence table), KosmicKrisp (memory
+(virtio-snd CoreAudio backend), virglrenderer (linear features, shm import, shared fence table, MTLHeap sharing),
+guest Venus driver (optimal-tiled opaque-fd images), KosmicKrisp (memory
 type, fill mode, D3D12 stage 1 and transform feedback), gamescope (wl_shm refresh, absolute pointer), Proton fixes at session start (Wine
 service and explorer timeouts under FEX).
 
@@ -29,18 +38,8 @@ service and explorer timeouts under FEX).
 
 - D3D12: some edge-case suite tests still fail (texture reinterpretation, border colours, tessellation edge
   cases, 16 KB suballocation alignment).
-- InfraSpace: menus render (D3D12 and D3D11); after "Start Game" it plays a video through Media Foundation, which
-  stays black in both modes. Root cause (Wine `+vulkan,+d3dkmt` trace): `vkGetMemoryWin32HandleKHR` returns global
-  D3DKMT handle 0 because the shared video texture was never allocated exportable: KosmicKrisp reports images as not
-  exportable for the opaque-fd/dma-buf handle types Venus needs (it supports MTLHeap/host memory only), so DXVK
-  falls back to unshared images. Measured (`host-tests/external-image.c`): Venus answers every external image query
-  (BGRA8/RGBA8/NV12, sampled or render target, opaque fd or dma_buf, optimal tiling) with
-  `VK_ERROR_FORMAT_NOT_SUPPORTED`: dma_buf is emulated over shared host memory, and Metal only makes textures from
-  buffer memory in linear layout. A fix needs linear shared images through Venus and KosmicKrisp (same limit as
-  zink/gbm sharing); not a Proton change. Ruled out on the way: guest memory, `vm.max_map_count`, Wine's
-  D3DKMT implementation (Proton 11 has it).
 - Steam UI: Valve's own GL composer in the webhelper still runs on llvmpipe (guest ~330 % while navigating) and
-  its frames reach Xwayland by CPU copy: no GL on the GPU without exportable linear images (as above).
+  its frames reach Xwayland by CPU copy (moving it to the GPU through the new texture sharing is not done yet).
 - x86 processes start slowly under FEX (Vulkan setup ~3.4 s each); a game's first launch takes 1-2 minutes.
 - Steam downloads through the VM's user-mode network (libslirp) reached 8-14 Mbit/s.
 - Capture (microphone) is not implemented.

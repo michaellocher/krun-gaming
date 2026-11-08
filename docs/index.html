@@ -65,14 +65,19 @@
           <p>Vulkan 1.4 with swapchain on the M1 Pro: Venus → virglrenderer → Mesa KosmicKrisp → Metal.</p>
         </li>
         <li class="card">
+          <p class="metric">▶</p>
+          <h3>Shared textures</h3>
+          <p>Textures shared between Wine processes work: InfraSpace's Media Foundation intro video plays. Guest images are shared as Metal heaps on the host.</p>
+        </li>
+        <li class="card">
           <p class="metric">♪</p>
           <h3>Sound and input</h3>
           <p>virtio-snd to CoreAudio on the Mac's default output; keyboard and absolute mouse through virtio-input.</p>
         </li>
         <li class="card">
           <p class="metric">0</p>
-          <h3>Closed pieces</h3>
-          <p>Kernel, Mesa, virglrenderer, libkrun, gamescope, FEX, Proton: all built from source at pinned commits, with patches listed openly.</p>
+          <h3>Closed translation layers</h3>
+          <p>Kernel, Mesa, virglrenderer, libkrun, gamescope, FEX, Proton: all open source, built at pinned commits, with patches listed openly. Only Steam and your games are Valve's and theirs.</p>
         </li>
       </ul>
     </section>
@@ -143,7 +148,6 @@ sh run-session.sh    # Steam Big Picture in a Mac window</code></pre>
       <ul class="limits">
         <li><strong>Prototype.</strong> Tested on one machine (M1 Pro, 16&nbsp;GB).</li>
         <li><strong>D3D12:</strong> some edge cases of the test suite still fail: texture reinterpretation, border colours, tessellation, suballocation alignment.</li>
-        <li><strong>Shared video textures:</strong> InfraSpace's intro video stays black.</li>
         <li><strong>Steam UI:</strong> Valve's GL composer in the UI still renders on the CPU.</li>
         <li><strong>Startup:</strong> a game's first launch takes 1–2 minutes under FEX.</li>
         <li><strong>Downloads:</strong> 8–14&nbsp;Mbit/s through the VM's user-mode network.</li>

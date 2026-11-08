@@ -18,7 +18,8 @@ Host: MacBook Pro M1 Pro, 16 GB, macOS 27.0.1. Everything lands in `~/.local/sha
 | Vulkan on the Mac GPU in the guest, swapchain, picture in a Mac window | **done**: Venus → KosmicKrisp → Metal, IOSurface window |
 | Steam (native ARM64 client) in Big Picture under **gamescope** | **done**: flicker fixed (gamescope 0001), network status via NetworkManager |
 | D3D9–11 games (Proton + DXVK under FEX) | **playable at 60 fps**: Banished (D3D11) at 2560x1440 (kernel HZ=1000 + preemption) |
-| D3D12 (vkd3d-proton) | **test suite: 544/588 without failures**, stream output captured (KK 0004); InfraSpace (Unity, `-force-d3d12`): menus and input work; its Media Foundation video stays black (D3D11 too): KosmicKrisp images are not exportable for sharing |
+| D3D12 (vkd3d-proton) | **test suite: 544/588 without failures**, stream output captured (KK 0004); InfraSpace (Unity, `-force-d3d12`): menus and input work |
+| Shared textures (D3DKMT, Media Foundation video) | **InfraSpace's intro video plays** (D3D11 mode; was black) — see "Shared textures" |
 | Input | keyboard + absolute mouse (gamescope 0002); mouse reached the game in a user session |
 | Audio | **works**: virtio-snd → CoreAudio (libkrun 0010) + PipeWire, heard on the Mac's default output (listening test, 2026-11-08) |
 
@@ -34,6 +35,37 @@ sh guest-cmd.sh 'ps aux'  # command channel into the running session (--root for
 after start (measured 2026-11-08, one 10 s sample each): **host 83 % CPU, 3.0 GB RSS** at native resolution (UI
 fully loaded, checked in the snapshot); with `--env RENDER_W/RENDER_H` (gamescope upscaling) 1280x720 and 1920x1080
 both 173 % (load state not checked), so native stays the default. Log in to Steam in the window, install a game, play. Logs: `/tmp/kg-steam.log`, `~/.local/share/krun-gaming/out/steam-*.txt`.
+
+## Result: shared textures — InfraSpace's video plays (measured 2026-11-08)
+
+InfraSpace plays an intro video through Media Foundation after "Start Game"; it stayed black because the video
+texture is shared between Wine's processes (D3DKMT, opaque fd on Vulkan) and no image could be exported:
+
+- Guest: Fedora's Venus refuses exportable images without DRM-modifier tiling when the host's dma_buf is emulated
+  (`vn_GetPhysicalDeviceImageFormatProperties2`). `host-tests/external-image.c`: every query
+  `VK_ERROR_FORMAT_NOT_SUPPORTED`.
+- Host: virglrenderer backed exportable memory by shm, which Metal cannot place optimal-tiled textures in.
+  KosmicKrisp exports and imports any heap memory as an MTLHeap (`VK_EXT_external_memory_metal`), and all Venus
+  contexts live in one host process.
+
+Fix:
+
+- `host-patches/virglrenderer/0004`: exportable device-local memory is allocated with MTLHeap export; the resource
+  table maps the blob to the heap, an import in another context allocates from the same heap (same memory type and
+  size); the guest still gets a placeholder shm blob for its fd.
+- `guest-patches/mesa/0001` on our own Venus driver (`guest/venus-build.sh`, Mesa `c0235eff` like the host):
+  optimal tiling allowed for opaque-fd images. Built for aarch64, x86_64 (FEX) and i686, cross-compiled with clang
+  against Fedora's packages; `guest/venus-install.sh` checks architecture and glibc, runs the self-test and rolls
+  back to Fedora's driver on failure; `guest/steam-run.sh` heals it after package updates.
+
+Evidence:
+
+- `host-tests/share-image.c` in the guest: device A exports a cleared 64x64 RGBA8 optimal image, device B imports
+  it and copies it out: `PASS` (expected colour) in one process and across two processes (fd over a socket).
+- InfraSpace 1.56.460 (D3D11 mode, Unity log `Direct3D 11.0 [level 11.1]`, renderer `Virtio-GPU Venus (Apple M1
+  Pro)`): the game process maps our x86_64 driver (pressure-vessel copy, sha256 `720a4a58…`); after "Start Game"
+  the video plays — moving frames and changing subtitles in snapshots 2 s apart, later scenes 30 s on.
+- Not tested: InfraSpace's `-force-d3d12` mode.
 
 ## Result: picture in a Mac window (measured 2026-11-08)
 
@@ -70,7 +102,7 @@ image). Lean dnf defaults in `guest/provision.sh`; test tools in `guest/provisio
 | Piece | Version / source |
 |---|---|
 | guest kernel | Linux **7.3.3** (kernel.org) + 4 Apple-TSO patches from Asahi (`bits/220-tso`) + libkrunfw's aarch64 config |
-| guest Mesa | stock Fedora 44 `mesa-vulkan-drivers-26.2.6` (Venus); since 2026-11-08 setup.sh replaces its Venus driver with one built from the host's Mesa commit + `guest-patches/mesa` (aarch64, x86_64, i686; see "Shared textures") |
+| guest Mesa | stock Fedora 44 `mesa-vulkan-drivers-26.2.6` (Venus); since 2026-11-08 setup.sh replaces its Venus driver with one built from the host's Mesa commit + `guest-patches/mesa` (aarch64, x86_64, i686; see "Result: shared textures") |
 | virglrenderer | UTM fork `b6c4d36e` (UTM's pin), Venus, render server in thread mode, linked to MoltenVK |
 | MoltenVK | UTM fork `b5680e33` (UTM's pin), built like UTM (`fetchDependencies --macos`, `make macos`) |
 | libkrun | v1.19.8 + `host-patches/libkrun` 0007–0009 (from steamac; no upstream equivalent yet) |

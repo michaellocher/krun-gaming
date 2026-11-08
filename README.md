@@ -21,6 +21,7 @@ Measured 2026-11-08 on a MacBook Pro M1 Pro with 16 GB, macOS 27.0.1. Details an
 | Steam UI | ~50 fps while navigating, with Chromium's GPU compositing. Idle: host ~83 % CPU, ~3 GB RSS |
 | D3D11 | Banished (DXVK) at 60 fps (the display rate) at 2560x1440, menu and gameplay. Host ~62 % CPU, 3.2 GB RSS |
 | D3D12 | vkd3d-proton v3.1 test suite: 544 of 588 tests without a failed check, stream output (transform feedback) included. InfraSpace (Unity, `-force-d3d12`) renders its menus |
+| Shared textures | Textures shared between Wine processes (D3DKMT) work: InfraSpace's Media Foundation intro video plays (D3D11 mode). Our own guest Venus driver + an MTLHeap-sharing virglrenderer patch |
 | Input | keyboard and absolute mouse (virtio-input); one cursor (gamescope's) |
 | Sound | virtio-snd → CoreAudio, PipeWire in the guest; plays on the Mac's default output |
 | Vulkan in the guest | Vulkan 1.4 with swapchain on the M1 Pro (Venus → KosmicKrisp → Metal) |
@@ -77,7 +78,6 @@ Fixes are local patches, listed in [NOTICE](NOTICE.md):
 ## Known limits
 
 - **D3D12:** some edge-case tests of the suite still fail: texture reinterpretation, border colours, tessellation edge cases, 16 KB suballocation alignment.
-- **InfraSpace:** the Media Foundation video after "Start Game" stays black, because shared textures between processes are not supported yet.
 - **Steam UI:** Valve's GL composer in the webhelper runs on llvmpipe (CPU).
 - **First game launch:** takes 1–2 minutes. x86 processes start slowly under FEX (Vulkan setup ~3.4 s each).
 - **Downloads:** Steam downloads through the VM's user-mode network (libslirp) reached 8–14 Mbit/s.
