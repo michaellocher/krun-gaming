@@ -1,0 +1,90 @@
+diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
+index 774705e..fcd7a96 100644
+--- a/src/venus/vkr_physical_device.c
++++ b/src/venus/vkr_physical_device.c
+@@ -395,19 +395,37 @@ vkr_physical_device_init_queue_family_properties(struct vkr_physical_device *phy
+    physical_dev->queue_family_properties = props;
+ }
+ 
++/* krun-gaming: the emulated LINEAR modifier is a host VK_IMAGE_TILING_LINEAR
++ * image, so it has exactly the host's linear tiling features (a DRM compositor
++ * such as gamescope needs SAMPLED | STORAGE | TRANSFER_SRC for scanout), and no
++ * modifier at all when the format has no linear features.
++ */
+ static void
+-vkr_physical_device_emulate_drm_props(VkDrmFormatModifierPropertiesListEXT *drm_props_list)
++vkr_physical_device_emulate_drm_props(VkDrmFormatModifierPropertiesListEXT *drm_props_list,
++                                      VkFormatFeatureFlags linear_features)
+ {
+-    drm_props_list->drmFormatModifierCount = 1;
+-    if (drm_props_list->pDrmFormatModifierProperties) {
++   drm_props_list->drmFormatModifierCount = linear_features ? 1 : 0;
++   if (linear_features && drm_props_list->pDrmFormatModifierProperties) {
+       drm_props_list->pDrmFormatModifierProperties[0] = (VkDrmFormatModifierPropertiesEXT){
+          .drmFormatModifier = DRM_FORMAT_MOD_LINEAR,
+          .drmFormatModifierPlaneCount = 1,
+-         .drmFormatModifierTilingFeatures = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+-                                            VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+-                                            VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
++         .drmFormatModifierTilingFeatures = linear_features,
++      };
++   }
++}
++
++static void
++vkr_physical_device_emulate_drm_props2(VkDrmFormatModifierPropertiesList2EXT *drm_props_list,
++                                       VkFormatFeatureFlags2 linear_features)
++{
++   drm_props_list->drmFormatModifierCount = linear_features ? 1 : 0;
++   if (linear_features && drm_props_list->pDrmFormatModifierProperties) {
++      drm_props_list->pDrmFormatModifierProperties[0] = (VkDrmFormatModifierProperties2EXT){
++         .drmFormatModifier = DRM_FORMAT_MOD_LINEAR,
++         .drmFormatModifierPlaneCount = 1,
++         .drmFormatModifierTilingFeatures = linear_features,
+       };
+-    };
++   }
+ }
+ 
+ static void
+@@ -771,10 +789,20 @@ vkr_dispatch_vkGetPhysicalDeviceFormatProperties2(
+ 
+    /* emulate support for drm format modifiers */
+    if (!physical_dev->EXT_image_drm_format_modifier) {
++      const VkFormatFeatureFlags linear =
++         args->pFormatProperties->formatProperties.linearTilingFeatures;
+       VkDrmFormatModifierPropertiesListEXT* drm_props_list =
+          vkr_find_struct(args->pFormatProperties, VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT);
+       if (drm_props_list) {
+-         vkr_physical_device_emulate_drm_props(drm_props_list);
++         vkr_physical_device_emulate_drm_props(drm_props_list, linear);
++      }
++      VkDrmFormatModifierPropertiesList2EXT *drm_props_list2 = vkr_find_struct(
++         args->pFormatProperties, VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_2_EXT);
++      if (drm_props_list2) {
++         const VkFormatProperties3 *props3 =
++            vkr_find_struct(args->pFormatProperties, VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3);
++         vkr_physical_device_emulate_drm_props2(
++            drm_props_list2, props3 ? props3->linearTilingFeatures : (VkFormatFeatureFlags2)linear);
+       }
+    }
+ }
+@@ -853,15 +881,9 @@ vkr_dispatch_vkGetPhysicalDeviceImageFormatProperties2(
+       if (img_props && args->ret == VK_SUCCESS)
+          vkr_emulate_dma_buf_memory_properties(&img_props->externalMemoryProperties);
+    }
+-
+-   /* emulate support for drm format modifiers */
+-   if (!physical_dev->EXT_image_drm_format_modifier) {
+-      VkDrmFormatModifierPropertiesListEXT* drm_props_list =
+-         vkr_find_struct(args->pImageFormatProperties, VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT);
+-      if (drm_props_list) {
+-         vkr_physical_device_emulate_drm_props(drm_props_list);
+-      }
+-   }
++   /* krun-gaming: no modifier list here; VkDrmFormatModifierPropertiesListEXT is
++    * not a valid structure in the VkImageFormatProperties2 chain.
++    */
+ }
+ 
+ static void

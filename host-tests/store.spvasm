@@ -1,0 +1,43 @@
+; compute shader for shm-coherence.c: imageStore(img, gl_GlobalInvocationID.xy, vec4(push.v)) over an rgba8 storage view
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gid
+               OpExecutionMode %main LocalSize 8 8 1
+               OpDecorate %gid BuiltIn GlobalInvocationId
+               OpDecorate %img DescriptorSet 0
+               OpDecorate %img Binding 0
+               OpDecorate %img NonReadable
+               OpDecorate %PC Block
+               OpMemberDecorate %PC 0 Offset 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+      %v4f   = OpTypeVector %float 4
+      %v3u   = OpTypeVector %uint 3
+      %v2u   = OpTypeVector %uint 2
+      %v2i   = OpTypeVector %int 2
+      %image = OpTypeImage %float 2D 0 0 0 2 Rgba8
+   %ptr_img  = OpTypePointer UniformConstant %image
+        %img = OpVariable %ptr_img UniformConstant
+   %ptr_gid  = OpTypePointer Input %v3u
+        %gid = OpVariable %ptr_gid Input
+         %PC = OpTypeStruct %float
+    %ptr_pc  = OpTypePointer PushConstant %PC
+         %pc = OpVariable %ptr_pc PushConstant
+  %ptr_pcf   = OpTypePointer PushConstant %float
+      %int_0 = OpConstant %int 0
+    %float_1 = OpConstant %float 1
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+          %i = OpLoad %image %img
+          %g = OpLoad %v3u %gid
+         %xy = OpVectorShuffle %v2u %g %g 0 1
+        %xyi = OpBitcast %v2i %xy
+         %vp = OpAccessChain %ptr_pcf %pc %int_0
+          %v = OpLoad %float %vp
+          %c = OpCompositeConstruct %v4f %v %v %v %float_1
+               OpImageWrite %i %xyi %c
+               OpReturn
+               OpFunctionEnd

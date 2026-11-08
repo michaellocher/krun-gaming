@@ -1,0 +1,78 @@
+From: krun-gaming
+Subject: [PATCH] virgl_fence: share the fence table between proxy and in-process render server
+
+With render-server-mode=thread the proxy (VMM side) and the render server live
+in one process and share the global fence table. When the render server's last
+context went away, render_state_fini() destroyed the table under the proxy's
+sync thread (NULL dereference in virgl_fence_retire, whole VMM crashed after a
+guest device loss). Count init/cleanup pairs and destroy with the last user.
+---
+diff --git a/src/virgl_fence.c b/src/virgl_fence.c
+index 801c805..568df34 100644
+--- a/src/virgl_fence.c
++++ b/src/virgl_fence.c
+@@ -5,6 +5,8 @@
+ 
+ #include "virgl_fence.h"
+ 
++#include <pthread.h>
++
+ #include "c11/threads.h"
+ #include "util/hash_table.h"
+ #include "util/macros.h"
+@@ -36,9 +38,21 @@ static void virgl_fence_table_cleanup_cb(struct hash_entry *entry)
+    free(fence);
+ }
+ 
++/* The proxy (VMM side) and an in-process render server (render-server-mode
++ * thread) share this table; each pairs init with cleanup, so count users and
++ * only destroy it with the last one. */
++static pthread_mutex_t virgl_fence_users_lock = PTHREAD_MUTEX_INITIALIZER;
++static unsigned virgl_fence_users;
++
+ void
+ virgl_fence_table_cleanup(void)
+ {
++   pthread_mutex_lock(&virgl_fence_users_lock);
++   if (!virgl_fence_users || --virgl_fence_users) {
++      pthread_mutex_unlock(&virgl_fence_users_lock);
++      return;
++   }
++
+    _mesa_hash_table_u64_destroy(virgl_fence_table,
+                                 virgl_fence_table_cleanup_cb);
+ 
+@@ -48,20 +62,32 @@ virgl_fence_table_cleanup(void)
+ 
+    if (last_signalled_fence.fd >= 0)
+       close(last_signalled_fence.fd);
++   last_signalled_fence.fd = -1;
++   pthread_mutex_unlock(&virgl_fence_users_lock);
+ }
+ 
+ int
+ virgl_fence_table_init(void)
+ {
++   pthread_mutex_lock(&virgl_fence_users_lock);
++   if (virgl_fence_users++) {
++      pthread_mutex_unlock(&virgl_fence_users_lock);
++      return 0;
++   }
++
+    virgl_fence_table = _mesa_hash_table_u64_create(NULL);
+-   if (!virgl_fence_table)
++   if (!virgl_fence_table) {
++      virgl_fence_users--;
++      pthread_mutex_unlock(&virgl_fence_users_lock);
+       return -ENOMEM;
++   }
+ 
+    mtx_init(&virgl_fence_table_lock, mtx_plain);
+ 
+    last_signalled_fence.id = 0;
+    last_signalled_fence.fd = -1;
+ 
++   pthread_mutex_unlock(&virgl_fence_users_lock);
+    return 0;
+ }
+ 

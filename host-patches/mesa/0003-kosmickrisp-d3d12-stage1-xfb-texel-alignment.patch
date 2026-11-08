@@ -1,0 +1,288 @@
+From: krun-gaming
+Subject: [PATCH] kosmickrisp: D3D12 stage 1 — transform feedback entry points, single-texel alignment
+
+vkd3d-proton refuses devices without VK_EXT_transform_feedback and single-texel
+alignment. Stage 1: the extension, its commands (capturing nothing yet) and the
+stream query (results 0); unaligned texel buffer views rounded down to Metal's
+16 bytes; buffer views of formats without texel-buffer support are backed by an
+R32_UINT view (failing them is fatal under Venus, which creates objects
+asynchronously); views above maxTexelBufferElements are clamped (Metal aborts).
+---
+diff --git a/src/kosmickrisp/vulkan/kk_buffer_view.c b/src/kosmickrisp/vulkan/kk_buffer_view.c
+index 3a0aa03..17bd63e 100644
+--- a/src/kosmickrisp/vulkan/kk_buffer_view.c
++++ b/src/kosmickrisp/vulkan/kk_buffer_view.c
+@@ -18,6 +18,7 @@
+ #include "kosmickrisp/bridge/mtl_bridge.h"
+ #include "kosmickrisp/bridge/mtl_format.h"
+ 
++#include "util/format/u_format.h"
+ #include "vk_format.h"
+ 
+ VkFormatFeatureFlags2
+@@ -65,6 +66,34 @@ kk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
+ 
+    enum pipe_format p_format = vk_format_to_pipe_format(view->vk.format);
+    const struct kk_va_format *supported_format = kk_get_va_format(p_format);
++   uint32_t elements = view->vk.elements;
++   /* krun-gaming: vkd3d-proton (D3D12) also creates views of formats without
++    * texel-buffer support (e.g. R32G32B32). Failing is not an option under
++    * Venus, which creates objects asynchronously and treats a missing object
++    * as fatal, so back them with an R32_UINT view of the same range: reads
++    * through it are undefined, as for any format without the feature bit. */
++   if (supported_format == NULL) {
++      static bool warned;
++      if (!warned)
++         mesa_logw("kosmickrisp: texel buffer view of unsupported format %s, "
++                   "backed by R32_UINT", util_format_name(p_format));
++      warned = true;
++      p_format = PIPE_FORMAT_R32_UINT;
++      supported_format = kk_get_va_format(p_format);
++      elements = MAX2(view->vk.range / 4, 1);
++   }
++
++   /* krun-gaming: vkd3d-proton creates views above maxTexelBufferElements
++    * (it warns and goes on); Metal aborts the whole process on them, so clamp.
++    * Out-of-range reads are then robust-access zeros. */
++   if (elements > 16384u * 16384u) {
++      static bool warned_size;
++      if (!warned_size)
++         mesa_logw("kosmickrisp: texel buffer view of %u elements clamped",
++                   elements);
++      warned_size = true;
++      elements = 16384u * 16384u;
++   }
+ 
+    /* If we reached here, we support reading at least */
+    enum mtl_texture_usage usage = MTL_TEXTURE_USAGE_SHADER_READ;
+@@ -72,12 +101,11 @@ kk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
+       usage |= MTL_TEXTURE_USAGE_SHADER_WRITE;
+ 
+    /* Only these formats allow atomics for texel buffers */
+-   if (view->vk.format == VK_FORMAT_R32_UINT ||
+-       view->vk.format == VK_FORMAT_R32_SINT)
++   if (p_format == PIPE_FORMAT_R32_UINT || p_format == PIPE_FORMAT_R32_SINT)
+       usage |= MTL_TEXTURE_USAGE_SHADER_ATOMIC;
+ 
+    struct kk_image_layout layout = {
+-      .width_px = view->vk.elements,
++      .width_px = elements,
+       .height_px = 1u,
+       .depth_px = 1u,
+       .layers = 1u,
+@@ -99,9 +127,20 @@ kk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
+    };
+    struct kk_buffer *buffer =
+       container_of(view->vk.buffer, struct kk_buffer, vk);
++   uint64_t mtl_offset = kk_buffer_mtl_offset(buffer, view->vk.offset);
++   /* krun-gaming: single-texel alignment is advertised for vkd3d-proton (D3D12),
++    * Metal needs 16 bytes. Stage 1 rounds unaligned views down (reads start up
++    * to 15 bytes early); stage 2 carries the remainder into the shader. */
++   if (mtl_offset % KK_MIN_TEXEL_BUFFER_ALIGNMENT) {
++      static bool warned;
++      if (!warned)
++         mesa_logw("kosmickrisp: texel buffer view at unaligned offset, rounded down");
++      warned = true;
++      layout.linear_stride_B += mtl_offset % KK_MIN_TEXEL_BUFFER_ALIGNMENT;
++      mtl_offset -= mtl_offset % KK_MIN_TEXEL_BUFFER_ALIGNMENT;
++   }
+    view->mtl_texel_buffer_handle = mtl_new_texture_with_descriptor_linear(
+-      buffer->metal.handle, &layout,
+-      kk_buffer_mtl_offset(buffer, view->vk.offset));
++      buffer->metal.handle, &layout, mtl_offset);
+    if (!view->mtl_texel_buffer_handle) {
+       vk_buffer_view_destroy(&dev->vk, pAllocator, &view->vk);
+       return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index da95447..48fe619 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -2709,3 +2709,55 @@ kk_CmdDrawIndexedIndirectCount2KHR(VkCommandBuffer commandBuffer,
+ 
+    kk_draw(cmd, &data);
+ }
++
++/* krun-gaming: VK_EXT_transform_feedback stage 1. vkd3d-proton (D3D12) refuses a
++ * device without the extension; few games use stream output. Binding, begin and
++ * end are accepted but capture nothing yet, and byte-count draws draw nothing.
++ * Stage 2 wires these to the poly geometry path (count/pre_gs, as Honeykrisp). */
++static void
++kk_xfb_stub_warn(const char *what)
++{
++   static bool warned;
++   if (!warned)
++      mesa_logw("kosmickrisp: %s: transform feedback is not captured yet", what);
++   warned = true;
++}
++
++VKAPI_ATTR void VKAPI_CALL
++kk_CmdBindTransformFeedbackBuffersEXT(VkCommandBuffer commandBuffer,
++                                      uint32_t firstBinding,
++                                      uint32_t bindingCount,
++                                      const VkBuffer *pBuffers,
++                                      const VkDeviceSize *pOffsets,
++                                      const VkDeviceSize *pSizes)
++{
++}
++
++VKAPI_ATTR void VKAPI_CALL
++kk_CmdBeginTransformFeedbackEXT(VkCommandBuffer commandBuffer,
++                                uint32_t firstCounterBuffer,
++                                uint32_t counterBufferCount,
++                                const VkBuffer *pCounterBuffers,
++                                const VkDeviceSize *pCounterBufferOffsets)
++{
++   kk_xfb_stub_warn("vkCmdBeginTransformFeedbackEXT");
++}
++
++VKAPI_ATTR void VKAPI_CALL
++kk_CmdEndTransformFeedbackEXT(VkCommandBuffer commandBuffer,
++                              uint32_t firstCounterBuffer,
++                              uint32_t counterBufferCount,
++                              const VkBuffer *pCounterBuffers,
++                              const VkDeviceSize *pCounterBufferOffsets)
++{
++}
++
++VKAPI_ATTR void VKAPI_CALL
++kk_CmdDrawIndirectByteCountEXT(VkCommandBuffer commandBuffer,
++                               uint32_t instanceCount, uint32_t firstInstance,
++                               VkBuffer counterBuffer,
++                               VkDeviceSize counterBufferOffset,
++                               uint32_t counterOffset, uint32_t vertexStride)
++{
++   kk_xfb_stub_warn("vkCmdDrawIndirectByteCountEXT");
++}
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index 8fbd20c..26e4aa4 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -139,6 +139,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
+       .EXT_index_type_uint8 = true,
+       .EXT_line_rasterization = true,
+       .EXT_pipeline_robustness = true,
++      .EXT_transform_feedback = true, /* krun-gaming: stage 1, see kk_cmd_draw.c */
+       .EXT_vertex_attribute_divisor = true,
+ 
+       /* Optional extensions */
+@@ -358,6 +359,10 @@ kk_get_device_features(
+       .shaderFloatControls2 = true,
+       .shaderSubgroupRotate = true,
+       .shaderSubgroupRotateClustered = true,
++      /* VK_EXT_transform_feedback (krun-gaming stage 1, nothing captured yet) */
++      .transformFeedback = true,
++      .geometryStreams = false,
++
+       .vertexAttributeInstanceRateDivisor = true,
+       .vertexAttributeInstanceRateZeroDivisor = true,
+ 
+@@ -769,9 +774,11 @@ kk_get_device_properties(
+       .integerDotProduct4x8BitPackedSignedAccelerated = false,
+       .integerDotProduct4x8BitPackedMixedSignednessAccelerated = false,
+       .storageTexelBufferOffsetAlignmentBytes = KK_MIN_TEXEL_BUFFER_ALIGNMENT,
+-      .storageTexelBufferOffsetSingleTexelAlignment = false,
++      /* krun-gaming: Metal needs 16-byte aligned texture-buffer offsets; unaligned
++       * views are rounded down for now (kk_buffer_view.c, stage 1 for vkd3d) */
++      .storageTexelBufferOffsetSingleTexelAlignment = true,
+       .uniformTexelBufferOffsetAlignmentBytes = KK_MIN_TEXEL_BUFFER_ALIGNMENT,
+-      .uniformTexelBufferOffsetSingleTexelAlignment = false,
++      .uniformTexelBufferOffsetSingleTexelAlignment = true,
+       .maxBufferSize = pdev->info.max_buffer_size,
+ 
+       /* VK_KHR_push_descriptor */
+diff --git a/src/kosmickrisp/vulkan/kk_query_pool.c b/src/kosmickrisp/vulkan/kk_query_pool.c
+index 104d73d..43b75fc 100644
+--- a/src/kosmickrisp/vulkan/kk_query_pool.c
++++ b/src/kosmickrisp/vulkan/kk_query_pool.c
+@@ -38,6 +38,10 @@ kk_reports_per_query(struct kk_query_pool *pool)
+    case VK_QUERY_TYPE_OCCLUSION:
+    case VK_QUERY_TYPE_TIMESTAMP:
+       return 1;
++   case VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT:
++      /* krun-gaming: primitives written, primitives needed (stage 1: always 0,
++       * transform feedback writes nothing yet) */
++      return 2;
+    default:
+       UNREACHABLE("Unsupported query type");
+    }
+@@ -77,7 +81,8 @@ kk_query_report_addr(struct kk_device *dev, struct kk_query_pool *pool,
+       kk_pool_is_oq(pool) ? dev->occlusion_queries.bo : pool->bo;
+ 
+    uint32_t index =
+-      kk_pool_is_ts(pool) ? query : kk_pool_index_ptr(pool)[query];
++      !kk_pool_is_oq(pool) ? query * kk_reports_per_query(pool)
++                           : kk_pool_index_ptr(pool)[query];
+    return bo->gpu + pool->query_start + (index * sizeof(uint64_t));
+ }
+ 
+@@ -97,7 +102,8 @@ kk_query_report_map(struct kk_device *dev, struct kk_query_pool *pool,
+ 
+    uint64_t *queries = (uint64_t *)(bo->cpu + pool->query_start);
+    uint32_t index =
+-      kk_pool_is_ts(pool) ? query : kk_pool_index_ptr(pool)[query];
++      !kk_pool_is_oq(pool) ? query * kk_reports_per_query(pool)
++                           : kk_pool_index_ptr(pool)[query];
+ 
+    return (struct kk_query_report *)&queries[index];
+ }
+@@ -268,7 +274,7 @@ emit_zero_queries(struct kk_cmd_buffer *cmd, struct kk_query_pool *pool,
+    struct libkk_reset_query_args info = {
+       .availability = kk_pool_is_ts(pool) ? 0u : pool->bo->gpu,
+       .results = results_bo->gpu + pool->query_start,
+-      .oq_index = kk_pool_is_ts(pool) ? 0u : pool->bo->gpu + pool->index_start,
++      .oq_index = kk_pool_is_oq(pool) ? pool->bo->gpu + pool->index_start : 0u,
+ 
+       .first_query = first_index,
+       .reports_per_query = kk_reports_per_query(pool),
+@@ -438,6 +444,8 @@ kk_CmdBeginQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+ {
+    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
++   if (!kk_pool_is_oq(pool))
++      return;
+    cmd->state.gfx.occlusion.mode = flags & VK_QUERY_CONTROL_PRECISE_BIT
+                                       ? MTL_VISIBILITY_RESULT_MODE_COUNTING
+                                       : MTL_VISIBILITY_RESULT_MODE_BOOLEAN;
+@@ -452,8 +460,10 @@ kk_CmdEndQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+ {
+    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
+-   cmd->state.gfx.occlusion.mode = MTL_VISIBILITY_RESULT_MODE_DISABLED;
+-   cmd->state.gfx.dirty |= KK_DIRTY_OCCLUSION;
++   if (kk_pool_is_oq(pool)) {
++      cmd->state.gfx.occlusion.mode = MTL_VISIBILITY_RESULT_MODE_DISABLED;
++      cmd->state.gfx.dirty |= KK_DIRTY_OCCLUSION;
++   }
+ 
+    /* Make the query available. The Vulkan spec states:
+     * If queries are used while executing a render pass instance that has
+@@ -599,7 +609,7 @@ kk_CmdCopyQueryPoolResultsToMemoryKHR(
+    struct libkk_copy_queries_args args = {
+       .availability = kk_pool_is_ts(pool) ? 0u : pool->bo->gpu,
+       .results = results_bo->gpu + pool->query_start,
+-      .oq_index = kk_pool_is_ts(pool) ? 0u : pool->bo->gpu + pool->index_start,
++      .oq_index = kk_pool_is_oq(pool) ? pool->bo->gpu + pool->index_start : 0u,
+       .dst_addr = pDstRange->address,
+       .dst_stride = pDstRange->stride,
+       .first_query = firstQuery,
+@@ -608,3 +618,20 @@ kk_CmdCopyQueryPoolResultsToMemoryKHR(
+    };
+    libkk_copy_queries_struct(cmd, kk_grid_1d(queryCount), false, args);
+ }
++
++/* krun-gaming: VK_EXT_transform_feedback stage 1 — indexed queries for the
++ * transform-feedback stream query (results stay 0, see kk_reports_per_query) */
++VKAPI_ATTR void VKAPI_CALL
++kk_CmdBeginQueryIndexedEXT(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
++                           uint32_t query, VkQueryControlFlags flags,
++                           uint32_t index)
++{
++   kk_CmdBeginQuery(commandBuffer, queryPool, query, flags);
++}
++
++VKAPI_ATTR void VKAPI_CALL
++kk_CmdEndQueryIndexedEXT(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
++                         uint32_t query, uint32_t index)
++{
++   kk_CmdEndQuery(commandBuffer, queryPool, query);
++}

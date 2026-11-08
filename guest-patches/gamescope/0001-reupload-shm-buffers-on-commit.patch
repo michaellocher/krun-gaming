@@ -1,0 +1,186 @@
+From: krun-gaming
+Subject: [PATCH] re-upload wl_shm client buffers on every commit
+
+import_commit memoizes one texture per wlr_buffer. For dma-bufs it shares the client memory, for wl_shm
+buffers it is a copy taken on the first commit, so a client that cycles a few shm buffers (Xwayland
+without glamor) was shown their first contents forever (3-frame flicker of stale images).
+---
+--- a/src/rendervulkan.hpp	2026-11-08 05:00:31
++++ b/src/rendervulkan.hpp	2026-11-08 05:00:57
+@@ -462,6 +462,7 @@
+ gamescope::OwningRc<CVulkanTexture> vulkan_create_texture_from_dmabuf( struct wlr_dmabuf_attributes *pDMA, gamescope::OwningRc<gamescope::IBackendFb> pBackendFb );
+ gamescope::OwningRc<CVulkanTexture> vulkan_create_texture_from_bits( uint32_t width, uint32_t height, uint32_t contentWidth, uint32_t contentHeight, uint32_t drmFormat, CVulkanTexture::createFlags texCreateFlags, void *bits );
+ gamescope::OwningRc<CVulkanTexture> vulkan_create_texture_from_wlr_buffer( struct wlr_buffer *buf, gamescope::OwningRc<gamescope::IBackendFb> pBackendFb );
++bool vulkan_update_texture_from_wlr_buffer( CVulkanTexture *pTex, struct wlr_buffer *buf );
+ 
+ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamescope::Rc<CVulkanTexture> pScreenshotTexture, bool partial, gamescope::Rc<CVulkanTexture> pOutputOverride = nullptr, bool increment = true, std::unique_ptr<CVulkanCmdBuffer> pInCommandBuffer = nullptr );
+ void vulkan_wait( uint64_t ulSeqNo, bool bReset );
+--- a/src/rendervulkan.cpp	2026-11-08 05:00:31
++++ b/src/rendervulkan.cpp	2026-11-08 05:00:57
+@@ -4728,26 +4728,15 @@
+ 	return &renderer->base;
+ }
+ 
+-gamescope::OwningRc<CVulkanTexture> vulkan_create_texture_from_wlr_buffer( struct wlr_buffer *buf, gamescope::OwningRc<gamescope::IBackendFb> pBackendFb )
++// Copies a buffer's CPU-side pixels (wl_shm) into pTex, which must have been created with bTransferDst.
++static bool copy_wlr_buffer_pixels( struct wlr_buffer *buf, CVulkanTexture *pTex )
+ {
+-
+-	struct wlr_dmabuf_attributes dmabuf = {0};
+-	if ( wlr_buffer_get_dmabuf( buf, &dmabuf ) )
+-	{
+-		return vulkan_create_texture_from_dmabuf( &dmabuf, pBackendFb );
+-	}
+-
+-	VkResult result;
+-
+ 	void *src;
+ 	uint32_t drmFormat;
+ 	size_t stride;
+ 	if ( !wlr_buffer_begin_data_ptr_access( buf, WLR_BUFFER_DATA_PTR_ACCESS_READ, &src, &drmFormat, &stride ) )
+-	{
+-		return nullptr;
+-	}
++		return false;
+ 
+-	uint32_t width = buf->width;
+ 	uint32_t height = buf->height;
+ 
+ 	VkBufferCreateInfo bufferCreateInfo = {
+@@ -4756,50 +4745,34 @@
+ 		.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+ 	};
+ 	VkBuffer buffer;
+-	result = g_device.vk.CreateBuffer( g_device.device(), &bufferCreateInfo, nullptr, &buffer );
++	VkResult result = g_device.vk.CreateBuffer( g_device.device(), &bufferCreateInfo, nullptr, &buffer );
+ 	if ( result != VK_SUCCESS )
+ 	{
+ 		wlr_buffer_end_data_ptr_access( buf );
+-		return nullptr;
++		return false;
+ 	}
+ 
+ 	VkMemoryRequirements memRequirements;
+ 	g_device.vk.GetBufferMemoryRequirements(g_device.device(), buffer, &memRequirements);
+ 
+ 	uint32_t memTypeIndex =  g_device.findMemoryType(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT|VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, memRequirements.memoryTypeBits );
+-	if ( memTypeIndex == ~0u )
+-	{
+-		wlr_buffer_end_data_ptr_access( buf );
+-		return nullptr;
+-	}
+-
+ 	VkMemoryAllocateInfo allocInfo = {
+ 		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+ 		.allocationSize = memRequirements.size,
+ 		.memoryTypeIndex = memTypeIndex,
+ 	};
+-
+-	VkDeviceMemory bufferMemory;
+-	result = g_device.vk.AllocateMemory( g_device.device(), &allocInfo, nullptr, &bufferMemory);
+-	if ( result != VK_SUCCESS )
++	VkDeviceMemory bufferMemory = VK_NULL_HANDLE;
++	void *dst = nullptr;
++	if ( memTypeIndex == ~0u ||
++		 g_device.vk.AllocateMemory( g_device.device(), &allocInfo, nullptr, &bufferMemory ) != VK_SUCCESS ||
++		 g_device.vk.BindBufferMemory( g_device.device(), buffer, bufferMemory, 0 ) != VK_SUCCESS ||
++		 g_device.vk.MapMemory( g_device.device(), bufferMemory, 0, VK_WHOLE_SIZE, 0, &dst ) != VK_SUCCESS )
+ 	{
+ 		wlr_buffer_end_data_ptr_access( buf );
+-		return nullptr;
+-	}
+-
+-	result = g_device.vk.BindBufferMemory( g_device.device(), buffer, bufferMemory, 0 );
+-	if ( result != VK_SUCCESS )
+-	{
+-		wlr_buffer_end_data_ptr_access( buf );
+-		return nullptr;
+-	}
+-
+-	void *dst;
+-	result = g_device.vk.MapMemory( g_device.device(), bufferMemory, 0, VK_WHOLE_SIZE, 0, &dst );
+-	if ( result != VK_SUCCESS )
+-	{
+-		wlr_buffer_end_data_ptr_access( buf );
+-		return nullptr;
++		g_device.vk.DestroyBuffer(g_device.device(), buffer, nullptr);
++		if ( bufferMemory != VK_NULL_HANDLE )
++			g_device.vk.FreeMemory(g_device.device(), bufferMemory, nullptr);
++		return false;
+ 	}
+ 
+ 	memcpy( dst, src, stride * height );
+@@ -4808,14 +4781,6 @@
+ 
+ 	wlr_buffer_end_data_ptr_access( buf );
+ 
+-	gamescope::OwningRc<CVulkanTexture> pTex = new CVulkanTexture();
+-	CVulkanTexture::createFlags texCreateFlags;
+-	texCreateFlags.bSampled = true;
+-	texCreateFlags.bTransferDst = true;
+-	texCreateFlags.bFlippable = true;
+-	if ( pTex->BInit( width, height, 1u, drmFormat, texCreateFlags, nullptr, 0, 0, nullptr, pBackendFb ) == false )
+-		return nullptr;
+-
+ 	auto cmdBuffer = g_device.commandBuffer();
+ 
+ 	cmdBuffer->copyBufferToImage( buffer, 0, stride / DRMFormatGetBPP(drmFormat), pTex);
+@@ -4827,6 +4792,48 @@
+ 
+ 	g_device.vk.DestroyBuffer(g_device.device(), buffer, nullptr);
+ 	g_device.vk.FreeMemory(g_device.device(), bufferMemory, nullptr);
++	return true;
++}
+ 
++gamescope::OwningRc<CVulkanTexture> vulkan_create_texture_from_wlr_buffer( struct wlr_buffer *buf, gamescope::OwningRc<gamescope::IBackendFb> pBackendFb )
++{
++
++	struct wlr_dmabuf_attributes dmabuf = {0};
++	if ( wlr_buffer_get_dmabuf( buf, &dmabuf ) )
++	{
++		return vulkan_create_texture_from_dmabuf( &dmabuf, pBackendFb );
++	}
++
++	void *src;
++	uint32_t drmFormat;
++	size_t stride;
++	if ( !wlr_buffer_begin_data_ptr_access( buf, WLR_BUFFER_DATA_PTR_ACCESS_READ, &src, &drmFormat, &stride ) )
++	{
++		return nullptr;
++	}
++	wlr_buffer_end_data_ptr_access( buf );
++
++	gamescope::OwningRc<CVulkanTexture> pTex = new CVulkanTexture();
++	CVulkanTexture::createFlags texCreateFlags;
++	texCreateFlags.bSampled = true;
++	texCreateFlags.bTransferDst = true;
++	texCreateFlags.bFlippable = true;
++	if ( pTex->BInit( buf->width, buf->height, 1u, drmFormat, texCreateFlags, nullptr, 0, 0, nullptr, pBackendFb ) == false )
++		return nullptr;
++
++	if ( !copy_wlr_buffer_pixels( buf, pTex.get() ) )
++		return nullptr;
++
+ 	return pTex;
+ }
++
++// A wl_shm buffer's texture is a copy taken when it was created: a client that commits the same buffer again
++// (Xwayland without glamor cycles a few of them) needs the copy refreshed, or the old contents are shown.
++bool vulkan_update_texture_from_wlr_buffer( CVulkanTexture *pTex, struct wlr_buffer *buf )
++{
++	struct wlr_dmabuf_attributes dmabuf = {0};
++	if ( wlr_buffer_get_dmabuf( buf, &dmabuf ) )
++		return true; // the texture shares the client's memory
++
++	return copy_wlr_buffer_pixels( buf, pTex );
++}
+--- a/src/steamcompmgr.cpp	2026-11-08 05:00:31
++++ b/src/steamcompmgr.cpp	2026-11-08 05:00:57
+@@ -1852,6 +1852,7 @@
+ 
+ 	if ( gamescope::OwningRc<CVulkanTexture> pTexture = s_BufferMemos.LookupVulkanTexture( buf ) )
+ 	{
++		vulkan_update_texture_from_wlr_buffer( pTexture.get(), buf );
+ 		// Going from OwningRc -> Rc now.
+ 		commit->vulkanTex = pTexture;
+ 		return commit;

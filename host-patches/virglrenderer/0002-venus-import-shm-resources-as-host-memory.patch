@@ -1,0 +1,66 @@
+diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
+index 1c460fd..a73eb69 100644
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -303,11 +303,32 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+ 
+    /* translate VkImportMemoryResourceInfoMESA into VkImportMemoryFdInfoKHR in place */
+    VkImportMemoryFdInfoKHR local_import_info = { .fd = -1 };
++   VkImportMemoryHostPointerInfoEXT res_host_import;
+    VkImportMemoryResourceInfoMESA *res_info = NULL;
+    VkBaseInStructure *prev_of_res_info = vkr_find_prev_struct(
+       alloc_info, VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA);
++   struct vkr_resource *shm_res = NULL;
+    if (prev_of_res_info) {
+       res_info = (VkImportMemoryResourceInfoMESA *)prev_of_res_info->pNext;
++      struct vkr_resource *res = vkr_context_get_resource(ctx, res_info->resourceId);
++      if (res && res->fd_type == VIRGL_RESOURCE_FD_SHM)
++         shm_res = res;
++   }
++   if (shm_res) {
++      /* krun-gaming: a resource exported by another context (e.g. a client's
++       * swapchain image that a compositor samples) is shm on this host, and the
++       * driver cannot import an fd. Import the pages the resource already maps
++       * as host memory: both contexts then share them without a copy.
++       */
++      res_host_import = (VkImportMemoryHostPointerInfoEXT){
++         .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
++         .pNext = res_info->pNext,
++         .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
++         .pHostPointer = shm_res->u.data,
++      };
++      prev_of_res_info->pNext = (const struct VkBaseInStructure *)&res_host_import;
++      alloc_info->allocationSize = shm_res->size;
++   } else if (prev_of_res_info) {
+       if (!vkr_get_fd_info_from_resource_info(ctx, res_info, &local_import_info)) {
+          args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+          return;
+@@ -564,6 +585,28 @@ vkr_dispatch_vkGetMemoryResourcePropertiesMESA(
+       return;
+    }
+ 
++   VkMemoryResourceAllocationSizePropertiesMESA *shm_size_props =
++      vkr_find_struct(args->pMemoryResourceProperties->pNext,
++                      VK_STRUCTURE_TYPE_MEMORY_RESOURCE_ALLOCATION_SIZE_PROPERTIES_MESA);
++   if (res->fd_type == VIRGL_RESOURCE_FD_SHM && dev->physical_device->is_dma_buf_emulated) {
++      /* krun-gaming: shm resources are imported as host memory (see
++       * vkAllocateMemory), so report the types host pointers can go into.
++       */
++      VkMemoryHostPointerPropertiesEXT host_props = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT,
++      };
++      vn_replace_vkGetMemoryResourcePropertiesMESA_args_handle(args);
++      args->ret = dev->GetMemoryHostPointerPropertiesEXT(
++         args->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, res->u.data,
++         &host_props);
++      if (args->ret != VK_SUCCESS)
++         return;
++      args->pMemoryResourceProperties->memoryTypeBits = host_props.memoryTypeBits;
++      if (shm_size_props)
++         shm_size_props->allocationSize = res->size;
++      return;
++   }
++
+    if (res->fd_type != VIRGL_RESOURCE_FD_DMABUF) {
+       args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+       return;

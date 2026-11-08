@@ -1,0 +1,427 @@
+diff --git a/src/venus/vkr_context.c b/src/venus/vkr_context.c
+index 2ea5898..3dafeb1 100644
+--- a/src/venus/vkr_context.c
++++ b/src/venus/vkr_context.c
+@@ -353,6 +353,12 @@ vkr_context_create_resource_from_device_memory(struct vkr_context *ctx,
+       return false;
+    }
+ 
++   if (mem->metal_export && !vkr_metal_share_register(res_id, ctx->ctx_id, mem)) {
++      vkr_context_remove_resource(ctx, res_id);
++      close(blob.u.fd);
++      return false;
++   }
++
+    *out_blob = blob;
+ 
+    return true;
+@@ -415,6 +421,7 @@ vkr_context_destroy_resource(struct vkr_context *ctx, uint32_t res_id)
+    }
+    mtx_unlock(&ctx->ring_mutex);
+ 
++   vkr_metal_share_forget(res_id, ctx->ctx_id);
+    vkr_context_remove_resource(ctx, res_id);
+ }
+ 
+@@ -636,6 +643,7 @@ vkr_context_destroy(struct vkr_context *ctx)
+       vkr_instance_destroy(ctx, ctx->instance, false);
+    }
+ 
++   vkr_metal_share_forget_context(ctx->ctx_id);
+    _mesa_hash_table_destroy(ctx->resource_table, vkr_context_free_resource);
+    mtx_destroy(&ctx->resource_mutex);
+ 
+diff --git a/src/venus/vkr_device.c b/src/venus/vkr_device.c
+index 81c694c..b4dc9a3 100644
+--- a/src/venus/vkr_device.c
++++ b/src/venus/vkr_device.c
+@@ -142,6 +142,7 @@ vkr_dispatch_vkCreateDevice(struct vn_dispatch_context *dispatch,
+    ext_count += physical_dev->KHR_external_memory_fd;
+    ext_count += physical_dev->EXT_external_memory_dma_buf;
+    ext_count += physical_dev->KHR_external_fence_fd;
++   ext_count += physical_dev->EXT_external_memory_metal;
+    if (ext_count > args->pCreateInfo->enabledExtensionCount || drop_emulated) {
+       exts = malloc(sizeof(*exts) * ext_count);
+       if (!exts) {
+@@ -180,6 +181,8 @@ vkr_dispatch_vkCreateDevice(struct vn_dispatch_context *dispatch,
+          exts[ext_count++] = "VK_EXT_external_memory_dma_buf";
+       if (physical_dev->KHR_external_fence_fd)
+          exts[ext_count++] = "VK_KHR_external_fence_fd";
++      if (physical_dev->EXT_external_memory_metal)
++         exts[ext_count++] = "VK_EXT_external_memory_metal";
+ 
+       ((VkDeviceCreateInfo *)args->pCreateInfo)->ppEnabledExtensionNames = exts;
+       ((VkDeviceCreateInfo *)args->pCreateInfo)->enabledExtensionCount = ext_count;
+@@ -212,6 +215,10 @@ vkr_dispatch_vkCreateDevice(struct vn_dispatch_context *dispatch,
+       dev->GetMemoryHostPointerPropertiesEXT =
+          (PFN_vkGetMemoryHostPointerPropertiesEXT)vk->GetDeviceProcAddr(
+             dev->base.handle.device, "vkGetMemoryHostPointerPropertiesEXT");
++      if (physical_dev->EXT_external_memory_metal) {
++         dev->GetMemoryMetalHandleEXT = (PFN_vkr_GetMemoryMetalHandleEXT)vk->GetDeviceProcAddr(
++            dev->base.handle.device, "vkGetMemoryMetalHandleEXT");
++      }
+    }
+ 
+    free(exts);
+diff --git a/src/venus/vkr_device.h b/src/venus/vkr_device.h
+index 3c4b875..0d5de92 100644
+--- a/src/venus/vkr_device.h
++++ b/src/venus/vkr_device.h
+@@ -12,6 +12,22 @@
+ 
+ #include "vkr_context.h"
+ 
++/* VK_EXT_external_memory_metal (vulkan_metal.h needs VK_USE_PLATFORM_METAL_EXT) */
++typedef struct {
++   VkStructureType sType;
++   const void *pNext;
++   VkExternalMemoryHandleTypeFlagBits handleType;
++   void *handle;
++} VkrImportMemoryMetalHandleInfoEXT;
++typedef struct {
++   VkStructureType sType;
++   const void *pNext;
++   VkDeviceMemory memory;
++   VkExternalMemoryHandleTypeFlagBits handleType;
++} VkrMemoryGetMetalHandleInfoEXT;
++typedef VkResult(VKAPI_PTR *PFN_vkr_GetMemoryMetalHandleEXT)(VkDevice, const VkrMemoryGetMetalHandleInfoEXT *,
++                                                             void **);
++
+ struct vkr_device {
+    struct vkr_object base;
+ 
+@@ -29,6 +45,7 @@ struct vkr_device {
+ 
+    /* set when the physical device emulates dma_buf on top of host memory */
+    PFN_vkGetMemoryHostPointerPropertiesEXT GetMemoryHostPointerPropertiesEXT;
++   PFN_vkr_GetMemoryMetalHandleEXT GetMemoryMetalHandleEXT;
+ };
+ VKR_DEFINE_OBJECT_CAST(device, VK_OBJECT_TYPE_DEVICE, VkDevice)
+ 
+diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
+index a73eb69..169daf7 100644
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -16,6 +16,135 @@
+ #include "util/anon_file.h"
+ #include "vkr_physical_device.h"
+ 
++#include <pthread.h>
++#ifdef __APPLE__
++#include <CoreFoundation/CoreFoundation.h>
++#endif
++
++struct vkr_metal_share {
++   uint32_t res_id;
++   uint32_t ctx_id;
++   uint32_t memory_type_index;
++   uint64_t allocation_size;
++   void *heap; /* retained MTLHeap */
++};
++
++static pthread_mutex_t vkr_metal_share_mutex = PTHREAD_MUTEX_INITIALIZER;
++static struct vkr_metal_share *vkr_metal_shares;
++static uint32_t vkr_metal_share_count;
++static uint32_t vkr_metal_share_capacity;
++
++static void
++vkr_metal_retain(void *obj)
++{
++#ifdef __APPLE__
++   CFRetain(obj);
++#else
++   (void)obj;
++#endif
++}
++
++static void
++vkr_metal_release(void *obj)
++{
++#ifdef __APPLE__
++   CFRelease(obj);
++#else
++   (void)obj;
++#endif
++}
++
++bool
++vkr_metal_share_register(uint32_t res_id, uint32_t ctx_id, struct vkr_device_memory *mem)
++{
++   struct vkr_device *dev = mem->device;
++   const VkrMemoryGetMetalHandleInfoEXT info = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_GET_METAL_HANDLE_INFO_EXT,
++      .memory = mem->base.handle.device_memory,
++      .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT,
++   };
++   void *heap = NULL;
++   if (!dev->GetMemoryMetalHandleEXT ||
++       dev->GetMemoryMetalHandleEXT(dev->base.handle.device, &info, &heap) != VK_SUCCESS ||
++       !heap) {
++      vkr_log("mem has no MTLHeap to share");
++      return false;
++   }
++
++   pthread_mutex_lock(&vkr_metal_share_mutex);
++   if (vkr_metal_share_count == vkr_metal_share_capacity) {
++      const uint32_t capacity = vkr_metal_share_capacity ? vkr_metal_share_capacity * 2 : 16;
++      struct vkr_metal_share *shares =
++         realloc(vkr_metal_shares, sizeof(*shares) * capacity);
++      if (!shares) {
++         pthread_mutex_unlock(&vkr_metal_share_mutex);
++         return false;
++      }
++      vkr_metal_shares = shares;
++      vkr_metal_share_capacity = capacity;
++   }
++   vkr_metal_retain(heap);
++   vkr_metal_shares[vkr_metal_share_count++] = (struct vkr_metal_share){
++      .res_id = res_id,
++      .ctx_id = ctx_id,
++      .memory_type_index = mem->memory_type_index,
++      .allocation_size = mem->allocation_size,
++      .heap = heap,
++   };
++   pthread_mutex_unlock(&vkr_metal_share_mutex);
++   return true;
++}
++
++bool
++vkr_metal_share_lookup(uint32_t res_id, void **heap, uint32_t *memory_type_index,
++                       uint64_t *allocation_size)
++{
++   bool found = false;
++   pthread_mutex_lock(&vkr_metal_share_mutex);
++   for (uint32_t i = 0; i < vkr_metal_share_count; i++) {
++      if (vkr_metal_shares[i].res_id == res_id) {
++         *heap = vkr_metal_shares[i].heap;
++         *memory_type_index = vkr_metal_shares[i].memory_type_index;
++         *allocation_size = vkr_metal_shares[i].allocation_size;
++         found = true;
++         break;
++      }
++   }
++   pthread_mutex_unlock(&vkr_metal_share_mutex);
++   return found;
++}
++
++static void
++vkr_metal_share_forget_matching(uint32_t res_id, uint32_t ctx_id, bool any_res)
++{
++   pthread_mutex_lock(&vkr_metal_share_mutex);
++   for (uint32_t i = 0; i < vkr_metal_share_count;) {
++      struct vkr_metal_share *share = &vkr_metal_shares[i];
++      if (share->ctx_id == ctx_id && (any_res || share->res_id == res_id)) {
++         vkr_metal_release(share->heap);
++         *share = vkr_metal_shares[--vkr_metal_share_count];
++      } else {
++         i++;
++      }
++   }
++   pthread_mutex_unlock(&vkr_metal_share_mutex);
++}
++
++/* Only the exporting context ends a share. Importers hold their own reference
++ * to the heap from the moment they import it (KosmicKrisp retains it).
++ */
++void
++vkr_metal_share_forget(uint32_t res_id, uint32_t ctx_id)
++{
++   vkr_metal_share_forget_matching(res_id, ctx_id, false);
++}
++
++void
++vkr_metal_share_forget_context(uint32_t ctx_id)
++{
++   vkr_metal_share_forget_matching(0, ctx_id, true);
++}
++
+ static bool
+ vkr_get_fd_info_from_resource_info(struct vkr_context *ctx,
+                                    const VkImportMemoryResourceInfoMESA *res_info,
+@@ -308,13 +437,39 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+    VkBaseInStructure *prev_of_res_info = vkr_find_prev_struct(
+       alloc_info, VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA);
+    struct vkr_resource *shm_res = NULL;
++   VkrImportMemoryMetalHandleInfoEXT res_metal_import;
++   void *metal_heap = NULL;
++   uint32_t metal_type_index;
++   uint64_t metal_size;
+    if (prev_of_res_info) {
+       res_info = (VkImportMemoryResourceInfoMESA *)prev_of_res_info->pNext;
+       struct vkr_resource *res = vkr_context_get_resource(ctx, res_info->resourceId);
+-      if (res && res->fd_type == VIRGL_RESOURCE_FD_SHM)
++      if (res && vkr_metal_share_lookup(res_info->resourceId, &metal_heap, &metal_type_index,
++                                        &metal_size)) {
++         /* stays NULL for shm_res */
++      } else if (res && res->fd_type == VIRGL_RESOURCE_FD_SHM) {
+          shm_res = res;
++      }
+    }
+-   if (shm_res) {
++   if (metal_heap) {
++      /* krun-gaming: device-local memory exported by a context of this process
++       * (see vkr_metal_share_register): import its MTLHeap.
++       */
++      if (mem_type_index != metal_type_index) {
++         vkr_log("metal share import with memory type %u, exported as %u", mem_type_index,
++                 metal_type_index);
++         args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
++         return;
++      }
++      res_metal_import = (VkrImportMemoryMetalHandleInfoEXT){
++         .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_METAL_HANDLE_INFO_EXT,
++         .pNext = res_info->pNext,
++         .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT,
++         .handle = metal_heap,
++      };
++      prev_of_res_info->pNext = (const struct VkBaseInStructure *)&res_metal_import;
++      alloc_info->allocationSize = metal_size;
++   } else if (shm_res) {
+       /* krun-gaming: a resource exported by another context (e.g. a client's
+        * swapchain image that a compositor samples) is shm on this host, and the
+        * driver cannot import an fd. Import the pages the resource already maps
+@@ -371,11 +526,23 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+     * and is otherwise left to fall through to a host that supports no fd handle
+     * type at all.
+     */
++   /* krun-gaming: memory the guest may export but cannot map (optimal-tiled
++    * images: Metal places them only in heaps, never in imported host memory) is
++    * an ordinary heap allocation, shared in-process by its MTLHeap.
++    */
++   const bool metal_export = physical_dev->is_dma_buf_emulated && !res_info && might_export &&
++                             !(property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
++                             dev->GetMemoryMetalHandleEXT;
+    const bool force_shm_import = physical_dev->is_dma_buf_emulated && !res_info &&
++                                 !metal_export &&
+                                  ((property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ||
+                                   might_export);
+ 
+-   if (force_shm_import) {
++   if (metal_export) {
++      export_info->handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT;
++      export_info = NULL; /* no fd handle type: valid_fd_types stays shm below */
++      valid_fd_types = 1 << VIRGL_RESOURCE_FD_SHM;
++   } else if (force_shm_import) {
+       if (export_info) {
+          /* Strip export info since valid_fd_types can only be shm here.  The
+           * guest asks for a dma_buf export when dma_buf is emulated, which
+@@ -516,6 +683,7 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+ 
+    mem->device = dev;
+    mem->might_export = might_export;
++   mem->metal_export = metal_export;
+    mem->property_flags = property_flags;
+    mem->valid_fd_types = valid_fd_types;
+    mem->udmabuf_fd = udmabuf_fd;
+@@ -588,6 +756,18 @@ vkr_dispatch_vkGetMemoryResourcePropertiesMESA(
+    VkMemoryResourceAllocationSizePropertiesMESA *shm_size_props =
+       vkr_find_struct(args->pMemoryResourceProperties->pNext,
+                       VK_STRUCTURE_TYPE_MEMORY_RESOURCE_ALLOCATION_SIZE_PROPERTIES_MESA);
++   void *metal_heap;
++   uint32_t metal_type_index;
++   uint64_t metal_size;
++   if (vkr_metal_share_lookup(args->resourceId, &metal_heap, &metal_type_index, &metal_size)) {
++      /* krun-gaming: a metal share imports only into the exporter's type */
++      args->pMemoryResourceProperties->memoryTypeBits = 1u << metal_type_index;
++      if (shm_size_props)
++         shm_size_props->allocationSize = metal_size;
++      args->ret = VK_SUCCESS;
++      return;
++   }
++
+    if (res->fd_type == VIRGL_RESOURCE_FD_SHM && dev->physical_device->is_dma_buf_emulated) {
+       /* krun-gaming: shm resources are imported as host memory (see
+        * vkAllocateMemory), so report the types host pointers can go into.
+@@ -695,6 +875,25 @@ vkr_device_memory_export_blob(struct vkr_device_memory *mem,
+                                       : VIRGL_RENDERER_MAP_CACHE_WC;
+    }
+ 
++   if (mem->metal_export) {
++      /* krun-gaming: the memory itself is shared as an MTLHeap (registered by
++       * the caller under the resource id); the virgl resource needs an fd, so
++       * it gets a sparse placeholder that is never written.
++       */
++      const size_t page_size = getpagesize();
++      const uint64_t size = (blob_size + page_size - 1) & ~(uint64_t)(page_size - 1);
++      int fd = os_create_anonymous_file(size, "vkr-mtl");
++      if (fd < 0)
++         return false;
++      mem->exported = true;
++      *out_blob = (struct virgl_context_blob){
++         .type = VIRGL_RESOURCE_FD_SHM,
++         .u.fd = fd,
++         .map_info = map_info,
++      };
++      return true;
++   }
++
+    if (mem->shm) {
+       mem->exported = true;
+       *out_blob = (struct virgl_context_blob){
+diff --git a/src/venus/vkr_device_memory.h b/src/venus/vkr_device_memory.h
+index 1e83bab..2669e3e 100644
+--- a/src/venus/vkr_device_memory.h
++++ b/src/venus/vkr_device_memory.h
+@@ -39,6 +39,11 @@ struct vkr_device_memory {
+    uint32_t memory_type_index;
+ 
+    bool exported;
++
++   /* krun-gaming: device-local memory the guest exports, shared as a retained
++    * MTLHeap (see vkr_metal_share_*)
++    */
++   bool metal_export;
+ };
+ VKR_DEFINE_OBJECT_CAST(device_memory, VK_OBJECT_TYPE_DEVICE_MEMORY, VkDeviceMemory)
+ 
+@@ -48,6 +53,25 @@ vkr_context_init_device_memory_dispatch(struct vkr_context *ctx);
+ void
+ vkr_device_memory_release(struct vkr_device_memory *mem);
+ 
++/* krun-gaming: device-local (non host visible) memory cannot be shm on this
++ * host, and Metal places optimal-tiled textures only in heaps. All contexts run
++ * in this one process, so exported memory is shared by its MTLHeap: the
++ * exporting context registers the heap under the global resource id, an
++ * importing context imports it with VK_EXT_external_memory_metal.
++ */
++bool
++vkr_metal_share_register(uint32_t res_id, uint32_t ctx_id, struct vkr_device_memory *mem);
++
++bool
++vkr_metal_share_lookup(uint32_t res_id, void **heap, uint32_t *memory_type_index,
++                       uint64_t *allocation_size);
++
++void
++vkr_metal_share_forget(uint32_t res_id, uint32_t ctx_id);
++
++void
++vkr_metal_share_forget_context(uint32_t ctx_id);
++
+ bool
+ vkr_device_memory_export_blob(struct vkr_device_memory *mem,
+                               uint64_t blob_size,
+diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
+index fcd7a96..63d0c69 100644
+--- a/src/venus/vkr_physical_device.c
++++ b/src/venus/vkr_physical_device.c
+@@ -288,6 +288,8 @@ vkr_physical_device_init_extensions(struct vkr_physical_device *physical_dev)
+          physical_dev->EXT_queue_family_foreign = true;
+       else if (!strcmp(props->extensionName, "VK_EXT_external_memory_host"))
+          physical_dev->EXT_external_memory_host = true;
++      else if (!strcmp(props->extensionName, "VK_EXT_external_memory_metal"))
++         physical_dev->EXT_external_memory_metal = true;
+       else if (!strcmp(props->extensionName, "VK_KHR_portability_subset"))
+          physical_dev->KHR_portability_subset = true;
+ 
+diff --git a/src/venus/vkr_physical_device.h b/src/venus/vkr_physical_device.h
+index d51c9f4..ffb952f 100644
+--- a/src/venus/vkr_physical_device.h
++++ b/src/venus/vkr_physical_device.h
+@@ -30,6 +30,7 @@ struct vkr_physical_device {
+    bool KHR_external_fence_fd;
+ 
+    bool EXT_external_memory_host;
++   bool EXT_external_memory_metal;
+ 
+    VkPhysicalDeviceMemoryProperties memory_properties;
+    VkPhysicalDeviceIDProperties id_properties;

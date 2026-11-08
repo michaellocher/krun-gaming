@@ -1,0 +1,23 @@
+From: krun-gaming
+Subject: [PATCH] drm/virtio: dumb buffers as guest blobs also with 3D
+
+A Venus-only host (no GL renderer, e.g. virglrenderer on macOS) cannot create
+classic 2D resources, so dumb buffers (Xorg modesetting, fbcon) failed with
+ERR_UNSPEC. Guest blobs need nothing from the host renderer.
+---
+--- a/drivers/gpu/drm/virtio/virtgpu_gem.c	2026-11-08 03:55:48
++++ b/drivers/gpu/drm/virtio/virtgpu_gem.c	2026-11-08 03:55:48
+@@ -81,7 +81,12 @@
+ 	params.size = args->size;
+ 	params.dumb = true;
+ 
+-	if (vgdev->has_resource_blob && !vgdev->has_virgl_3d) {
++	/*
++	 * Guest blobs need nothing from the host renderer. With 3D (e.g. a
++	 * Venus-only host without a GL renderer) classic 2D resources may not
++	 * be creatable at all, so use guest blobs whenever blobs are supported.
++	 */
++	if (vgdev->has_resource_blob) {
+ 		params.blob_mem = VIRTGPU_BLOB_MEM_GUEST;
+ 		params.blob_flags = VIRTGPU_BLOB_FLAG_USE_SHAREABLE;
+ 		params.blob = true;

@@ -1,0 +1,53 @@
+From: krun-gaming
+Subject: [PATCH] handle absolute pointer motion
+
+Pointers were only wired to relative motion, so an absolute pointer (a VM tablet-style mouse that
+follows the host cursor, e.g. virtio-input with ABS_X/ABS_Y) never moved the cursor. Map absolute
+events like touch input and warp the cursor there.
+---
+--- a/src/wlserver.hpp	2026-11-08 05:06:44
++++ b/src/wlserver.hpp	2026-11-08 05:06:44
+@@ -231,6 +231,7 @@
+ 	struct wlr_pointer *wlr;
+ 	
+ 	struct wl_listener motion;
++	struct wl_listener motion_absolute;
+ 	struct wl_listener button;
+ 	struct wl_listener axis;
+ 	struct wl_listener frame;
+--- a/src/wlserver.cpp	2026-11-08 05:06:44
++++ b/src/wlserver.cpp	2026-11-08 05:06:44
+@@ -350,6 +350,24 @@
+ 	wlserver.physical_cursor_move = true;
+ 
+ 	wlserver_mousemotion(event->unaccel_dx, event->unaccel_dy, event->time_msec);
++}
++
++// Absolute pointers (a VM's tablet-style mouse that follows the host cursor) report normalized output positions;
++// map them like touch input and warp the cursor there.
++static void wlserver_handle_pointer_motion_absolute(struct wl_listener *listener, void *data)
++{
++	struct wlr_pointer_motion_absolute_event *event = (struct wlr_pointer_motion_absolute_event *) data;
++
++	if ( wlserver.mouse_focus_surface == NULL )
++		return;
++
++	double x = event->x * g_nOutputWidth + focusedWindowOffsetX;
++	double y = event->y * g_nOutputHeight + focusedWindowOffsetY;
++	x *= focusedWindowScaleX;
++	y *= focusedWindowScaleY;
++
++	wlserver.physical_cursor_move = true;
++	wlserver_mousewarp( x, y, event->time_msec, false );
+ }
+ 
+ void wlserver_open_steam_menu( bool qam )
+@@ -555,6 +573,8 @@
+ 
+ 			pointer->motion.notify = wlserver_handle_pointer_motion;
+ 			wl_signal_add( &pointer->wlr->events.motion, &pointer->motion );
++			pointer->motion_absolute.notify = wlserver_handle_pointer_motion_absolute;
++			wl_signal_add( &pointer->wlr->events.motion_absolute, &pointer->motion_absolute );
+ 			pointer->button.notify = wlserver_handle_pointer_button;
+ 			wl_signal_add( &pointer->wlr->events.button, &pointer->button );
+ 			pointer->axis.notify = wlserver_handle_pointer_axis;

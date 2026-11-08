@@ -1,0 +1,24 @@
+diff --git a/src/virtio/vulkan/vn_physical_device.c b/src/virtio/vulkan/vn_physical_device.c
+index 788a8e5..27b0c5d 100644
+--- a/src/virtio/vulkan/vn_physical_device.c
++++ b/src/virtio/vulkan/vn_physical_device.c
+@@ -2800,9 +2800,18 @@ vn_GetPhysicalDeviceImageFormatProperties2(
+          external_info->handleType !=
+          VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID);
+ 
+-      /* venus doesn't support legacy tiling for scanout purpose */
++      /* venus doesn't support legacy tiling for scanout purpose
++       *
++       * krun-gaming: except for opaque fds. Those only ever go back into the
++       * same driver and device (Wine's D3D11 shared resources, e.g. Media
++       * Foundation video frames), never to a scanout or another driver, so the
++       * memory layout needs no modifier. The renderer shares such memory
++       * without an fd of its own.
++       */
+       if (renderer_handle_type ==
+              VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT &&
++          external_info->handleType !=
++             VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT &&
+           pImageFormatInfo->tiling !=
+              VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
+          return vn_error(physical_dev->instance,
