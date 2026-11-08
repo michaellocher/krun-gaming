@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>krun-gaming: Windows games from Steam on Apple Silicon, in a microVM</title>
+  <meta name="description" content="Valve's Steam client, Proton, DXVK and vkd3d-proton in a libkrun microVM on an Apple Silicon Mac. Open source, no Windows, no Rosetta.">
+  <meta name="color-scheme" content="dark">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header">
+    <nav class="nav" aria-label="Main">
+      <a class="brand" href="#top">krun<span>-gaming</span></a>
+      <ul>
+        <li><a href="#works">What works</a></li>
+        <li><a href="#how">How it works</a></li>
+        <li><a href="#start">Quick start</a></li>
+        <li><a href="#compare">Compared</a></li>
+        <li><a href="https://github.com/michaellocher/krun-gaming">GitHub</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top">
+      <p class="eyebrow">0.1.0 draft · open source · MIT</p>
+      <h1>Your Steam library on Apple&nbsp;Silicon, <em>the Steam&nbsp;Deck way</em>.</h1>
+      <p class="lede">
+        krun-gaming boots a Linux microVM in under a second and runs Valve's own Steam client, Proton, DXVK and
+        vkd3d-proton inside it. The Mac GPU is reached through Vulkan on Metal. No Windows license, no Rosetta,
+        no closed translation layer: every piece is open source and built from source.
+      </p>
+      <div class="cta">
+        <a class="button primary" href="#start">Get started</a>
+        <a class="button" href="https://github.com/michaellocher/krun-gaming">View on GitHub</a>
+      </div>
+      <p class="fineprint">A working prototype, tested on one machine: MacBook Pro M1 Pro, 16&nbsp;GB, macOS 27.0.1.</p>
+    </section>
+
+    <section id="works" aria-labelledby="works-title">
+      <h2 id="works-title">What works</h2>
+      <p class="section-lede">Measured 2026-11-08 on an M1 Pro with 16&nbsp;GB. Each number comes from a run described in the
+        <a href="https://github.com/michaellocher/krun-gaming/blob/main/notes/LAB-NOTES.md">lab notes</a>.</p>
+      <ul class="cards">
+        <li class="card">
+          <p class="metric">60 <small>fps</small></p>
+          <h3>Direct3D 11</h3>
+          <p>Banished through DXVK at 2560×1440 runs at the display rate, menu and gameplay alike. Host ~62&nbsp;% CPU, 3.2&nbsp;GB.</p>
+        </li>
+        <li class="card">
+          <p class="metric">544<small>/588</small></p>
+          <h3>Direct3D 12</h3>
+          <p>vkd3d-proton v3.1 test suite: tests without a failed check, with stream output (transform feedback) included.</p>
+        </li>
+        <li class="card">
+          <p class="metric">~50 <small>fps</small></p>
+          <h3>Steam Big Picture</h3>
+          <p>Valve's native ARM64 client under gamescope with GPU compositing, in a Retina window at 2560×1440.</p>
+        </li>
+        <li class="card">
+          <p class="metric">1.4</p>
+          <h3>Vulkan in the guest</h3>
+          <p>Vulkan 1.4 with swapchain on the M1 Pro: Venus → virglrenderer → Mesa KosmicKrisp → Metal.</p>
+        </li>
+        <li class="card">
+          <p class="metric">♪</p>
+          <h3>Sound and input</h3>
+          <p>virtio-snd to CoreAudio on the Mac's default output; keyboard and absolute mouse through virtio-input.</p>
+        </li>
+        <li class="card">
+          <p class="metric">0</p>
+          <h3>Closed pieces</h3>
+          <p>Kernel, Mesa, virglrenderer, libkrun, gamescope, FEX, Proton: all built from source at pinned commits, with patches listed openly.</p>
+        </li>
+      </ul>
+    </section>
+
+    <section id="how" aria-labelledby="how-title">
+      <h2 id="how-title">How it works</h2>
+      <p class="section-lede">The architecture of Asahi's muvm (microVM + FEX + Proton), on a macOS host.</p>
+      <figure class="stack">
+        <svg viewBox="0 0 760 430" role="img" aria-labelledby="stack-title stack-desc">
+          <title id="stack-title">krun-gaming stack</title>
+          <desc id="stack-desc">Inside the Linux guest: a Windows game runs on Proton and DXVK or vkd3d-proton, translated by FEX, under Steam and gamescope, rendering through Mesa's Venus Vulkan driver. Venus commands cross virtio-gpu to the macOS host, where virglrenderer and KosmicKrisp turn them into Metal on the Apple GPU; the picture is shown in an AppKit window.</desc>
+          <g class="layer guest">
+            <rect x="10" y="10" width="740" height="230" rx="18"/>
+            <text x="30" y="40" class="layer-label">Linux guest · Fedora 44 · kernel 7.3.3</text>
+          </g>
+          <g class="box"><rect x="40" y="60" width="210" height="52" rx="10"/><text x="145" y="92">Windows game (x86-64)</text></g>
+          <g class="box"><rect x="275" y="60" width="210" height="52" rx="10"/><text x="380" y="92">Proton · DXVK · vkd3d</text></g>
+          <g class="box"><rect x="510" y="60" width="210" height="52" rx="10"/><text x="615" y="92">FEX (x86-64 → ARM64)</text></g>
+          <g class="box"><rect x="40" y="140" width="210" height="52" rx="10"/><text x="145" y="172">Steam (ARM64)</text></g>
+          <g class="box"><rect x="275" y="140" width="210" height="52" rx="10"/><text x="380" y="172">gamescope</text></g>
+          <g class="box accent"><rect x="510" y="140" width="210" height="52" rx="10"/><text x="615" y="172">Mesa Venus (Vulkan)</text></g>
+          <g class="pipe"><line x1="615" y1="192" x2="615" y2="280"/><polygon points="605,270 625,270 615,286"/></g>
+          <text x="630" y="262" class="pipe-label">virtio-gpu</text>
+          <g class="layer host">
+            <rect x="10" y="290" width="740" height="130" rx="18"/>
+            <text x="30" y="320" class="layer-label">macOS host · libkrun on Hypervisor.framework</text>
+          </g>
+          <g class="box"><rect x="40" y="340" width="210" height="52" rx="10"/><text x="145" y="372">AppKit window</text></g>
+          <g class="box"><rect x="275" y="340" width="210" height="52" rx="10"/><text x="380" y="372">KosmicKrisp → Metal</text></g>
+          <g class="box accent"><rect x="510" y="340" width="210" height="52" rx="10"/><text x="615" y="372">virglrenderer</text></g>
+        </svg>
+        <figcaption>Games render through Vulkan into the guest; Venus forwards every Vulkan command to the host, where
+          Mesa's KosmicKrisp driver runs it on Metal. The picture goes straight to the window as an IOSurface, with no video encoding.</figcaption>
+      </figure>
+    </section>
+
+    <section id="start" aria-labelledby="start-title">
+      <h2 id="start-title">Quick start</h2>
+      <p class="section-lede">Needs an Apple Silicon Mac, Xcode, Homebrew, rustup and Node 26, plus a Steam account with your own games.</p>
+<pre class="code"><code>git clone https://github.com/michaellocher/krun-gaming
+cd krun-gaming
+bash setup.sh        # builds everything into ~/.local/share/krun-gaming
+sh run-session.sh    # Steam Big Picture in a Mac window</code></pre>
+      <p>Log in to Steam in the window, install a game, play. <code>setup.sh</code> skips every step whose output already exists.</p>
+    </section>
+
+    <section id="compare" aria-labelledby="compare-title">
+      <h2 id="compare-title">How it compares</h2>
+      <p class="section-lede">Other ways to play Windows games on an Apple Silicon Mac, from their own documentation.</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th scope="col">Approach</th><th scope="col">How</th><th scope="col">Graphics APIs</th><th scope="col">Source</th></tr>
+          </thead>
+          <tbody>
+            <tr class="us"><th scope="row">krun-gaming</th><td>Linux microVM, Steam + Proton under FEX</td><td>D3D9–11 via DXVK, D3D12 via vkd3d-proton (draft; see limits)</td><td><a href="https://github.com/michaellocher/krun-gaming/blob/main/notes/LAB-NOTES.md">lab notes</a></td></tr>
+            <tr><th scope="row">CrossOver / Game Porting Toolkit</th><td>Wine on macOS with D3DMetal</td><td>D3DMetal: DX11 and DX12, not DX9 (DXVK instead)</td><td><a href="https://support.codeweavers.com/en_US/advanced-settings-in-crossover-mac-26">CodeWeavers</a>, <a href="https://www.applegamingwiki.com/wiki/Game_Porting_Toolkit">AppleGamingWiki</a></td></tr>
+            <tr><th scope="row">Parallels Desktop</th><td>Windows 11 ARM VM</td><td>DirectX up to 11.1, OpenGL up to 4.3, no DX12</td><td><a href="https://kb.parallels.com/en/122485">Parallels KB 122485</a></td></tr>
+            <tr><th scope="row">UTM / QEMU</th><td>Windows ARM VM</td><td>No 3D acceleration for Windows guests (software renderer)</td><td><a href="https://github.com/utmapp/UTM/releases/tag/v2.2.1">UTM v2.2.1</a>, <a href="https://github.com/utmapp/UTM/issues/7732">#7732</a></td></tr>
+            <tr><th scope="row">Asahi muvm</th><td>libkrun + FEX + Proton: the same pattern</td><td>Linux host on Apple hardware, not macOS</td><td><a href="https://sinrega.org/2023-10-06-using-microvms-for-gaming-on-fedora-asahi/">Sergio López, 2023</a></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="limits" aria-labelledby="limits-title">
+      <h2 id="limits-title">Known limits</h2>
+      <ul class="limits">
+        <li><strong>Prototype.</strong> Tested on one machine (M1 Pro, 16&nbsp;GB).</li>
+        <li><strong>D3D12:</strong> some edge cases of the test suite still fail: texture reinterpretation, border colours, tessellation, suballocation alignment.</li>
+        <li><strong>Shared video textures:</strong> InfraSpace's intro video stays black.</li>
+        <li><strong>Steam UI:</strong> Valve's GL composer in the UI still renders on the CPU.</li>
+        <li><strong>Startup:</strong> a game's first launch takes 1–2 minutes under FEX.</li>
+        <li><strong>Downloads:</strong> 8–14&nbsp;Mbit/s through the VM's user-mode network.</li>
+        <li><strong>Microphone:</strong> not implemented.</li>
+        <li><strong>Anti-cheat:</strong> games whose anti-cheat refuses VMs will not run.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>krun-gaming is <a href="https://github.com/michaellocher/krun-gaming/blob/main/LICENSE">MIT licensed</a>; its patches keep the licenses of the projects they modify
+      (<a href="https://github.com/michaellocher/krun-gaming/blob/main/NOTICE.md">NOTICE</a>).</p>
+    <p>Not affiliated with or endorsed by Valve, Apple, CodeWeavers or Parallels. Steam and Proton are trademarks of Valve Corporation. Bring your own games.</p>
+  </footer>
+</body>
+</html>
