@@ -101,7 +101,7 @@ EOF
   build "$arch" "$want" --cross-file "/root/$arch.cross"
 }
 cross x86_64 lib64 x86_64 'x86-64' "'--target=x86_64-redhat-linux'"
-cross i686 lib x86 'Intel 80386' "'--target=x86_64-redhat-linux', '-m32'"
+cross i686 lib x86 'Intel.*386' "'--target=x86_64-redhat-linux', '-m32'"
 
 gcc -O2 -o /out/share-image /tests/share-image.c -lvulkan
 echo "$STAMP" > /out/stamp

@@ -38,7 +38,8 @@ check() { # check ARCH LIBC MACHINE: our build for ARCH fits
 }
 put() { # put ARCH TARGET: install ours unless already there (atomic rename: running processes keep the old file)
   lib=$V/$1/libvulkan_virtio.so
-  cmp -s "$lib" "$2" && return 0
+  # no cmp in the guest (diffutils is not installed)
+  [ -e "$2" ] && [ "$(sha256sum < "$lib")" = "$(sha256sum < "$2")" ] && return 0
   [ -e "$2.fedora" ] || [ ! -e "$2" ] || cp -p "$2" "$2.fedora"
   mkdir -p "$(dirname "$2")" && cp "$lib" "$2.new" && chmod 755 "$2.new" && mv -f "$2.new" "$2"
   echo "$1: installed $(sha256sum < "$2" | cut -c1-16) to $2"
