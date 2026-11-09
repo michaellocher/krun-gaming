@@ -3,6 +3,9 @@
 # Big Picture mode inside gamescope, as user "gamer" (Steam refuses root). Runs STEAM_SECONDS (default 1800).
 # Logs to /out/steam-*.txt.
 mkdir -p /out && mount -t virtiofs out /out
+# startup stage for the loader in the Mac window (run-session.sh: VM_STATUS_FILE), until Steam draws its first frame
+status() { printf '%s\n' "$1" > /out/status.txt; }
+status "Starting the network…"
 # our Venus driver back where a package update put Fedora's (setup.sh, venus-install.sh); log /out/venus-heal.txt
 /spike/venus-install.sh heal || echo "venus heal failed, see venus-heal.txt" >&2
 /spike/net-up.sh > /out/steam-net.txt 2>&1
@@ -86,6 +89,7 @@ mount -t debugfs none /sys/kernel/debug 2> /dev/null # KMS state for the live lo
 STEAM=$HOME/.local/share/Steam/steamrtarm64/steam
 ls -la "$STEAM" > /out/steam-launcher.txt 2>&1
 
+status "Preparing Proton…"
 # Wine's services.exe gives a starting service 10 s; x86 processes under FEX need longer, so RpcSs failed, explorer.exe
 # quit and games waited forever for a desktop. Raise the limit in every Proton prefix and in Proton's template
 # prefix (default_pfx), which new games' prefixes are copied from (README: Banished under gamescope).
@@ -103,6 +107,15 @@ printf '%s\n' "${WEBHELPER_FLAGS---use-gl=angle --use-angle=vulkan --enable-feat
   > /tmp/webhelper-flags
 chown gamer: /tmp/webhelper-flags
 
+status "Starting Steam…"
+# Steam's bootstrapper updates the client before its first frame (minutes after a fresh install): say so
+( for _ in $(seq 1 900); do
+    sleep 1
+    case "$(tail -1 "$HOME/.local/share/Steam/logs/bootstrap_log.txt" 2> /dev/null)" in
+      *Download* | *Extract* | *Verif* | *Install*) status "Steam is updating itself…" ;;
+      *) [ "$(cat /out/status.txt 2> /dev/null)" = "Steam is updating itself…" ] && status "Starting Steam…" ;;
+    esac
+  done ) &
 SESSION=${SESSION:-gamescope}
 if [ "$SESSION" = xorg ] || [ "$SESSION" = gamescope-nested ]; then
   # Xorg on the virtio-gpu KMS device (modesetting, no GL acceleration: shadow framebuffer). "gamescope-nested"

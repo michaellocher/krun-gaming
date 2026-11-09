@@ -33,6 +33,77 @@ static struct {
 static NSWindow *window;
 static CALayer *screen;
 
+// ---- loader: shown over the black window until the guest presents its first lit frame ----
+// VM_STATUS_FILE=path: its first line is shown as the status (the guest writes stages to the out share)
+
+static NSView *loader;
+static NSTextField *loader_status;
+static NSTimer *loader_timer;
+static bool loader_hidden;
+
+static NSTextField *loader_label(NSString *text, CGFloat size, NSColor *color) {
+    NSTextField *label = [NSTextField labelWithString:text];
+    label.font = [NSFont systemFontOfSize:size weight:NSFontWeightMedium];
+    label.textColor = color;
+    label.alignment = NSTextAlignmentCenter;
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    return label;
+}
+
+static void show_loader(NSView *parent) {
+    loader = [[NSView alloc] initWithFrame:parent.bounds];
+    loader.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    NSProgressIndicator *spinner = [[NSProgressIndicator alloc] init];
+    spinner.style = NSProgressIndicatorStyleSpinning;
+    spinner.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+    spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    [spinner startAnimation:nil];
+    NSTextField *title = loader_label(@"krun-gaming", 22, NSColor.whiteColor);
+    loader_status = loader_label(@"Starting the VM…", 13, [NSColor colorWithWhite:0.7 alpha:1]);
+    NSStackView *stack = [NSStackView stackViewWithViews:@[ spinner, title, loader_status ]];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.spacing = 14;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [loader addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.centerXAnchor constraintEqualToAnchor:loader.centerXAnchor],
+        [stack.centerYAnchor constraintEqualToAnchor:loader.centerYAnchor],
+    ]];
+    [parent addSubview:loader];
+    NSDate *start = [NSDate date];
+    const char *status_file = getenv("VM_STATUS_FILE");
+    NSString *path = status_file ? @(status_file) : nil;
+    loader_timer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) {
+        (void)t;
+        NSString *status = path ? [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil] : nil;
+        status = [[status componentsSeparatedByString:@"\n"].firstObject
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        int secs = (int)-start.timeIntervalSinceNow;
+        loader_status.stringValue = [NSString stringWithFormat:@"%@ · %d:%02d", status.length ? status : @"Starting…",
+                                                               secs / 60, secs % 60];
+    }];
+}
+
+// VM_SNAPSHOT_WINDOW=path.png: the window's own drawing (loader included) every 5 s, for checks without a screen
+static void snapshot_window_every(const char *path) {
+    NSString *file = @(path);
+    [NSTimer scheduledTimerWithTimeInterval:5 repeats:YES block:^(NSTimer *t) {
+        (void)t;
+        NSView *view = window.contentView;
+        NSBitmapImageRep *rep = [view bitmapImageRepForCachingDisplayInRect:view.bounds];
+        [view cacheDisplayInRect:view.bounds toBitmapImageRep:rep];
+        [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:file atomically:YES];
+    }];
+}
+
+static void hide_loader(void) {
+    [loader_timer invalidate];
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) {
+        ctx.duration = 0.3;
+        loader.animator.alphaValue = 0;
+    } completionHandler:^{ [loader removeFromSuperview]; }];
+}
+
 static int32_t display_disable(void *instance, uint32_t scanout_id) {
     (void)instance;
     if (scanout_id != 0) return KRUN_DISPLAY_ERR_INVALID_SCANOUT_ID;
@@ -146,6 +217,12 @@ static int32_t display_present(void *instance, uint32_t scanout_id, uint32_t fra
     if (presented == (at ? (unsigned)atoi(at) : 1u) || (every && presented % (unsigned)atoi(every) == 0))
         snapshot(surface);
     if (presented <= 5 || presented % 100 == 0) fprintf(stderr, "vm-gpu: %u frames presented\n", presented);
+    if (!loader_hidden) { // the first lit frame (> 1 % of sampled pixels not black) replaces the loader
+        const uint32_t *px = IOSurfaceGetBaseAddress(surface);
+        size_t count = (size_t)scanout.width * scanout.height, lit = 0, samples = 0;
+        for (size_t i = 0; i < count; i += 61, samples++) lit += (px[i] & 0xffffff) != 0;
+        if (lit * 100 > samples) loader_hidden = true, dispatch_async(dispatch_get_main_queue(), ^{ hide_loader(); });
+    }
     IOSurfaceUnlock(surface, 0, NULL);
     CFRetain(surface);
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -178,6 +255,8 @@ static void open_window(unsigned w, unsigned h) {
     screen.contentsGravity = kCAGravityResizeAspect;
     [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification object:window queue:nil
                                                   usingBlock:^(NSNotification *n) { (void)n; exit(0); }];
+    show_loader(window.contentView);
+    if (getenv("VM_SNAPSHOT_WINDOW")) snapshot_window_every(getenv("VM_SNAPSHOT_WINDOW"));
     [window center];
     [window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];

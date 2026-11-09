@@ -1,12 +1,12 @@
 From: krun-gaming
-Subject: [PATCH] virtio-snd: CoreAudio playback backend for macOS hosts
+Subject: [PATCH] virtio-snd: CoreAudio backend for macOS hosts
 
 libkrun's virtio-snd (from vhost-device-sound) only has a PipeWire backend, so
-the snd feature did not build on macOS. Add an AudioQueue (AudioToolbox) output
-backend, pick the backend per OS and make the pipewire dependency Linux-only.
-Capture streams are accepted but not implemented.
+the snd feature did not build on macOS. Add an AudioQueue (AudioToolbox) backend:
+playback through an output queue, capture through an input queue (default input
+device; macOS asks for microphone access). Pick the backend per OS and make the
+pipewire dependency Linux-only.
 ---
-diff --git a/src/devices/Cargo.toml b/src/devices/Cargo.toml
 diff --git a/src/devices/Cargo.toml b/src/devices/Cargo.toml
 index ffa766ca..050689cd 100644
 --- a/src/devices/Cargo.toml
@@ -70,12 +70,13 @@ index f35cbd72..4f869687 100644
  
 diff --git a/src/devices/src/virtio/snd/audio_backends/coreaudio.rs b/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
 new file mode 100644
-index 00000000..e157eaaa
+index 00000000..6ddba627
 --- /dev/null
 +++ b/src/devices/src/virtio/snd/audio_backends/coreaudio.rs
-@@ -0,0 +1,328 @@
+@@ -0,0 +1,384 @@
 +// CoreAudio (AudioToolbox AudioQueue) backend for macOS hosts: playback streams feed guest PCM periods to an
-+// output AudioQueue; capture streams are not implemented (the guest reads silence-free empty buffers).
++// output AudioQueue; capture streams fill the guest's periods from an input AudioQueue (the default input device;
++// macOS asks for microphone access once, attributed to the app that started the VM, e.g. the terminal).
 +// SPDX-License-Identifier: Apache-2.0 or BSD-3-Clause
 +
 +use std::{
@@ -85,7 +86,7 @@ index 00000000..e157eaaa
 +    sync::{Arc, Mutex, RwLock},
 +};
 +
-+use log::{debug, error};
++use log::error;
 +
 +use super::super::{
 +    stream::{Error as StreamError, PCMState},
@@ -128,12 +129,23 @@ index 00000000..e157eaaa
 +type AudioQueueBufferRef = *mut AudioQueueBuffer;
 +
 +type AudioQueueOutputCallback = extern "C" fn(*mut c_void, AudioQueueRef, AudioQueueBufferRef);
++type AudioQueueInputCallback =
++    extern "C" fn(*mut c_void, AudioQueueRef, AudioQueueBufferRef, *const c_void, u32, *const c_void);
 +
 +#[link(name = "AudioToolbox", kind = "framework")]
 +extern "C" {
 +    fn AudioQueueNewOutput(
 +        format: *const AudioStreamBasicDescription,
 +        callback: AudioQueueOutputCallback,
++        user_data: *mut c_void,
++        run_loop: *const c_void,
++        run_loop_mode: *const c_void,
++        flags: u32,
++        out_queue: *mut AudioQueueRef,
++    ) -> OSStatus;
++    fn AudioQueueNewInput(
++        format: *const AudioStreamBasicDescription,
++        callback: AudioQueueInputCallback,
 +        user_data: *mut c_void,
 +        run_loop: *const c_void,
 +        run_loop_mode: *const c_void,
@@ -256,6 +268,43 @@ index 00000000..e157eaaa
 +    }
 +}
 +
++/// Copies one filled host buffer into the guest's queued capture periods (dropped where the guest has none) and
++/// hands the buffer back to the queue.
++extern "C" fn input_callback(
++    user_data: *mut c_void,
++    queue: AudioQueueRef,
++    buf: AudioQueueBufferRef,
++    _start_time: *const c_void,
++    _packets: u32,
++    _packet_descs: *const c_void,
++) {
++    // SAFETY: as in output_callback; audio_data_byte_size bytes of buf are valid recorded data.
++    unsafe {
++        let ctx = &*(user_data as *const CallbackContext);
++        let data = std::slice::from_raw_parts((*buf).audio_data as *const u8, (*buf).audio_data_byte_size as usize);
++        let mut done = 0;
++        if let Ok(mut streams) = ctx.streams.write() {
++            if let Some(stream) = streams.get_mut(ctx.stream_id) {
++                while done < data.len() {
++                    let Some(period) = stream.buffers.front_mut() else { break };
++                    let avail = (period.desc_len() as usize).saturating_sub(period.pos);
++                    let n = avail.min(data.len() - done);
++                    // write_input advances period.pos itself
++                    if n == 0 || period.write_input(&data[done..done + n]).unwrap_or(0) == 0 {
++                        stream.buffers.pop_front();
++                        continue;
++                    }
++                    done += n;
++                    if period.pos >= period.desc_len() as usize {
++                        stream.buffers.pop_front(); // dropping it completes the period for the guest
++                    }
++                }
++            }
++        }
++        AudioQueueEnqueueBuffer(queue, buf, 0, ptr::null());
++    }
++}
++
 +impl AudioBackend for CoreAudioBackend {
 +    fn write(&self, stream_id: u32) -> Result<()> {
 +        match self.stream_state(stream_id)? {
@@ -300,10 +349,6 @@ index 00000000..e157eaaa
 +        };
 +        let mut queues = self.queues.lock().unwrap();
 +        queues.remove(&stream_id);
-+        if direction == Direction::Input {
-+            debug!("coreaudio: capture stream {stream_id} not implemented");
-+            return Ok(());
-+        }
 +        let (bits, bytes, signed) =
 +            sample_layout(format).ok_or(Error::UnexpectedAudioBackendConfiguration)?;
 +        let packed = if bits == bytes * 8 { K_FLAG_PACKED } else { 0 };
@@ -323,28 +368,39 @@ index 00000000..e157eaaa
 +            stream_id: stream_id as usize,
 +        }));
 +        let mut queue: AudioQueueRef = ptr::null_mut();
++        let input = direction == Direction::Input;
 +        // SAFETY: asbd and context outlive the call; a null run loop runs callbacks on AudioQueue's own thread.
 +        let status = unsafe {
-+            AudioQueueNewOutput(&asbd, output_callback, context as *mut c_void, ptr::null(), ptr::null(), 0, &mut queue)
++            if input {
++                AudioQueueNewInput(&asbd, input_callback, context as *mut c_void, ptr::null(), ptr::null(), 0, &mut queue)
++            } else {
++                AudioQueueNewOutput(&asbd, output_callback, context as *mut c_void, ptr::null(), ptr::null(), 0, &mut queue)
++            }
 +        };
++        let kind = if input { "input" } else { "output" };
 +        if status != 0 {
 +            // SAFETY: not handed to any queue
 +            drop(unsafe { Box::from_raw(context) });
-+            error!("coreaudio: AudioQueueNewOutput failed: {status}");
++            error!("coreaudio: AudioQueueNew {kind} failed: {status}");
 +            return Err(Error::UnexpectedAudioBackendConfiguration);
 +        }
 +        log::info!(
-+            "coreaudio: output queue {:.0} Hz, {channels} ch, {bits} bit, period {period_bytes} B",
++            "coreaudio: {kind} queue {:.0} Hz, {channels} ch, {bits} bit, period {period_bytes} B",
 +            asbd.sample_rate
 +        );
 +        let q = Queue { queue, context };
 +        let buffer_size = period_bytes.max(bytes * channels * 256);
 +        for _ in 0..QUEUE_BUFFERS {
 +            let mut buf: AudioQueueBufferRef = ptr::null_mut();
-+            // SAFETY: valid queue; the buffer is primed with silence by the callback before it is enqueued
++            // SAFETY: valid queue; output buffers are primed with silence by the callback before they are enqueued,
++            // input buffers go to the queue empty to be recorded into
 +            unsafe {
 +                if AudioQueueAllocateBuffer(queue, buffer_size, &mut buf) == 0 {
-+                    output_callback(context as *mut c_void, queue, buf);
++                    if input {
++                        AudioQueueEnqueueBuffer(queue, buf, 0, ptr::null());
++                    } else {
++                        output_callback(context as *mut c_void, queue, buf);
++                    }
 +                }
 +            }
 +        }
