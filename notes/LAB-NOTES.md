@@ -11,17 +11,20 @@ Host: MacBook Pro M1 Pro, 16 GB, macOS 27.0.1. Everything lands in `~/.local/sha
 **directly from Asahi Linux, UTM and upstream**, third-party work only where nothing upstream exists (see
 [NOTICE](../NOTICE.md)).
 
-## Status (2026-11-08)
+## Status (2026-11-09)
 
 | Goal | Status |
 |---|---|
 | Vulkan on the Mac GPU in the guest, swapchain, picture in a Mac window | **done**: Venus → KosmicKrisp → Metal, IOSurface window |
 | Steam (native ARM64 client) in Big Picture under **gamescope** | **done**: flicker fixed (gamescope 0001), network status via NetworkManager |
-| D3D9–11 games (Proton + DXVK under FEX) | **playable at 60 fps**: Banished (D3D11) at 2560x1440 (kernel HZ=1000 + preemption) |
+| D3D9–11 games (Proton + DXVK) | **playable at 60 fps**: Banished (D3D11) at 2560x1440; since 2026-11-09 through Valve's Proton 11.0 (ARM64), see "Fresh install" |
 | D3D12 (vkd3d-proton) | **test suite: 544/588 without failures**, stream output captured (KK 0004); InfraSpace (Unity, `-force-d3d12`): menus and input work |
 | Shared textures (D3DKMT, Media Foundation video) | **InfraSpace's intro video plays** (D3D11 mode; was black) — see "Shared textures" |
 | Input | keyboard + absolute mouse (gamescope 0002); mouse reached the game in a user session |
 | Audio | **works**: virtio-snd → CoreAudio (libkrun 0010) + PipeWire, heard on the Mac's default output (listening test, 2026-11-08) |
+| Microphone | **works**: CoreAudio input queue → virtio-snd capture (libkrun 0010), see "Fresh install" |
+| Downloads | **line rate**: 49–53 Mbit/s on a 50 Mbit/s line |
+| Fresh install | `setup.sh` from an empty cache in 21 min, games verified on it |
 
 ## Quick start
 
@@ -35,6 +38,31 @@ sh guest-cmd.sh 'ps aux'  # command channel into the running session (--root for
 after start (measured 2026-11-08, one 10 s sample each): **host 83 % CPU, 3.0 GB RSS** at native resolution (UI
 fully loaded, checked in the snapshot); with `--env RENDER_W/RENDER_H` (gamescope upscaling) 1280x720 and 1920x1080
 both 173 % (load state not checked), so native stays the default. Log in to Steam in the window, install a game, play. Logs: `/tmp/kg-steam.log`, `~/.local/share/krun-gaming/out/steam-*.txt`.
+
+## Result: fresh install — Proton 11.0 (ARM64), microphone, downloads (measured 2026-11-09)
+
+`setup.sh` from a fresh clone of the public repo into an empty cache: exit 0 in 21 minutes (23:40–00:01). On that
+install:
+
+- **Games run through Valve's Proton 11.0 (ARM64)** (`proton-11.0-2e-arm64`): the current ARM64 client picks it for
+  Windows games; it brings FEX as Wine's ARM64EC/WoW64 emulator (`files/lib/wine/aarch64-unix/libarm64ecfex.so`,
+  `libwow64fex.so`), and Vulkan is the guest's own aarch64 Venus driver (game process maps
+  `/run/host/usr/lib64/libvulkan_virtio.so`, sha256 `c0cd4bdc…` = our build). The previous path (x86 Proton under
+  Valve's FEX-Emu compat tool) cannot be installed anymore: forcing it as Steam Play default gave
+  `Failed installing AppID 3127680 (Invalid platform)` (and 4183110) in `content_log.txt`.
+- Banished: main menu at 2560x1440, 600 presented frames in ~10 s (60 fps, every frame different in the launcher's
+  frame fingerprints); Play → game window focused in ≤ 16 s. InfraSpace: menu, intro video after "Start Game" plays
+  (subtitles change between 2 s snapshots) — shared textures through the native driver.
+- Quirk: Banished's launcher (a static window) presented its only frame before gamescope switched focus to it and
+  stayed behind Big Picture's spinner; gamescope's focus properties were right (`GAMESCOPE_FOCUSED_APP=242920`,
+  `STEAM_OVERLAY=0`); it appeared after a click into it (or unmapping Big Picture). Continuously rendering windows
+  (the game itself, InfraSpace) were not affected.
+- Microphone: `arecord -D default -f S16_LE -r 48000 -c 2 -d 5` in the guest: 240000 frames; RMS ~5 room noise,
+  one second with speech at peak 903 / RMS 161 (macOS microphone permission granted).
+- Downloads: Steam's download page 49.3 Mbit/s steady, peak 52.7, on a 50 Mbit/s line (`content_log`:
+  34.8 / 46.3 / 40.2 / 49.3 Mbit/s per-minute samples).
+- Loader: the window shows a spinner with the guest's boot stage (`status.txt` written by `steam-run.sh`, e.g.
+  "Starting Steam… · 0:05") until the first lit frame (`VM_SNAPSHOT_WINDOW` snapshot), then Steam.
 
 ## Result: shared textures — InfraSpace's video plays (measured 2026-11-08)
 

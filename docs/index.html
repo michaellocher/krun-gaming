@@ -25,7 +25,7 @@
 
   <main id="main">
     <section class="hero" id="top">
-      <p class="eyebrow">0.1.0 draft · open source · MIT</p>
+      <p class="eyebrow">0.1.0 · open source · MIT</p>
       <h1>Your Steam library on Apple&nbsp;Silicon, <em>the Steam&nbsp;Deck way</em>.</h1>
       <p class="lede">
         krun-gaming boots a Linux microVM in under a second and runs Valve's own Steam client, Proton, DXVK and
@@ -71,8 +71,8 @@
         </li>
         <li class="card">
           <p class="metric">♪</p>
-          <h3>Sound and input</h3>
-          <p>virtio-snd to CoreAudio on the Mac's default output; keyboard and absolute mouse through virtio-input.</p>
+          <h3>Sound, microphone, input</h3>
+          <p>virtio-snd to CoreAudio: playback on the Mac's default output, the Mac's microphone as capture device; keyboard and absolute mouse through virtio-input.</p>
         </li>
         <li class="card">
           <p class="metric">0</p>
@@ -94,7 +94,7 @@
             <text x="30" y="40" class="layer-label">Linux guest · Fedora 44 · kernel 7.3.3</text>
           </g>
           <g class="box"><rect x="40" y="60" width="210" height="52" rx="10"/><text x="145" y="92">Windows game (x86-64)</text></g>
-          <g class="box"><rect x="275" y="60" width="210" height="52" rx="10"/><text x="380" y="92">Proton · DXVK · vkd3d</text></g>
+          <g class="box"><rect x="275" y="60" width="210" height="52" rx="10"/><text x="380" y="92">Proton ARM64 · DXVK · vkd3d</text></g>
           <g class="box"><rect x="510" y="60" width="210" height="52" rx="10"/><text x="615" y="92">FEX (x86-64 → ARM64)</text></g>
           <g class="box"><rect x="40" y="140" width="210" height="52" rx="10"/><text x="145" y="172">Steam (ARM64)</text></g>
           <g class="box"><rect x="275" y="140" width="210" height="52" rx="10"/><text x="380" y="172">gamescope</text></g>
@@ -121,7 +121,7 @@
 cd krun-gaming
 bash setup.sh        # builds everything into ~/.local/share/krun-gaming
 sh run-session.sh    # Steam Big Picture in a Mac window</code></pre>
-      <p>Log in to Steam in the window, install a game, play. <code>setup.sh</code> skips every step whose output already exists.</p>
+      <p>Log in to Steam in the window, install a game, play. A fresh <code>setup.sh</code> took 21 minutes on an M1 Pro; it skips every step whose output already exists. Steam downloads at the full line rate.</p>
     </section>
 
     <section id="compare" aria-labelledby="compare-title">
@@ -133,7 +133,7 @@ sh run-session.sh    # Steam Big Picture in a Mac window</code></pre>
             <tr><th scope="col">Approach</th><th scope="col">How</th><th scope="col">Graphics APIs</th><th scope="col">Source</th></tr>
           </thead>
           <tbody>
-            <tr class="us"><th scope="row">krun-gaming</th><td>Linux microVM, Steam + Proton under FEX</td><td>D3D9–11 via DXVK, D3D12 via vkd3d-proton (draft; see limits)</td><td><a href="https://github.com/michaellocher/krun-gaming/blob/main/notes/LAB-NOTES.md">lab notes</a></td></tr>
+            <tr class="us"><th scope="row">krun-gaming</th><td>Linux microVM, Steam + Proton 11.0 (ARM64) with FEX for x86 code</td><td>D3D9–11 via DXVK, D3D12 via vkd3d-proton (see limits)</td><td><a href="https://github.com/michaellocher/krun-gaming/blob/main/notes/LAB-NOTES.md">lab notes</a></td></tr>
             <tr><th scope="row">CrossOver / Game Porting Toolkit</th><td>Wine on macOS with D3DMetal</td><td>D3DMetal: DX11 and DX12, not DX9 (DXVK instead)</td><td><a href="https://support.codeweavers.com/en_US/advanced-settings-in-crossover-mac-26">CodeWeavers</a>, <a href="https://www.applegamingwiki.com/wiki/Game_Porting_Toolkit">AppleGamingWiki</a></td></tr>
             <tr><th scope="row">Parallels Desktop</th><td>Windows 11 ARM VM</td><td>DirectX up to 11.1, OpenGL up to 4.3, no DX12</td><td><a href="https://kb.parallels.com/en/122485">Parallels KB 122485</a></td></tr>
             <tr><th scope="row">UTM / QEMU</th><td>Windows ARM VM</td><td>No 3D acceleration for Windows guests (software renderer)</td><td><a href="https://github.com/utmapp/UTM/releases/tag/v2.2.1">UTM v2.2.1</a>, <a href="https://github.com/utmapp/UTM/issues/7732">#7732</a></td></tr>
@@ -149,9 +149,7 @@ sh run-session.sh    # Steam Big Picture in a Mac window</code></pre>
         <li><strong>Prototype.</strong> Tested on one machine (M1 Pro, 16&nbsp;GB).</li>
         <li><strong>D3D12:</strong> some edge cases of the test suite still fail: texture reinterpretation, border colours, tessellation, suballocation alignment.</li>
         <li><strong>Steam UI:</strong> Valve's GL composer in the UI still renders on the CPU.</li>
-        <li><strong>Startup:</strong> a game's first launch takes 1–2 minutes under FEX.</li>
-        <li><strong>Downloads:</strong> 8–14&nbsp;Mbit/s through the VM's user-mode network.</li>
-        <li><strong>Microphone:</strong> not implemented.</li>
+        <li><strong>Static game windows:</strong> a launcher that draws only once can stay behind Steam's loading spinner until you click into it.</li>
         <li><strong>Anti-cheat:</strong> games whose anti-cheat refuses VMs will not run.</li>
       </ul>
     </section>

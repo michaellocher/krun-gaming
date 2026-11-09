@@ -2,26 +2,31 @@
 
 Windows games from your Steam library on an Apple Silicon Mac, in a Linux microVM, the way a Steam Deck runs them.
 A small launcher on [libkrun](https://github.com/libkrun/libkrun) (Hypervisor.framework) boots a Fedora 44 guest
-that runs Valve's ARM64 Steam client in Big Picture mode under gamescope. Games run through Proton under
-[FEX](https://github.com/FEX-Emu/FEX) (x86-64 → ARM64), with DXVK (D3D9–11) and vkd3d-proton (D3D12) on Vulkan.
+that runs Valve's ARM64 Steam client in Big Picture mode under gamescope. Games run through Valve's Proton 11.0
+(ARM64), which emulates x86 game code with [FEX](https://github.com/FEX-Emu/FEX), with DXVK (D3D9–11) and
+vkd3d-proton (D3D12) on Vulkan.
 The guest's Vulkan reaches the Mac GPU through Venus, virglrenderer and Mesa's
 [KosmicKrisp](https://docs.mesa3d.org/drivers/kosmickrisp.html) (Vulkan on Metal). No Windows, no Rosetta, no
 Docker, and no closed-source translation layer.
 
-**Status: 0.1.0 draft, a working prototype.** Expect rough edges; see [known limits](#known-limits).
+**Status: 0.1.0, a working prototype.** Expect rough edges; see [known limits](#known-limits).
 
 ## What works
 
-Measured 2026-11-08 on a MacBook Pro M1 Pro with 16 GB, macOS 27.0.1. Details and how each result was measured are in the
+Measured 2026-11-08/09 on a MacBook Pro M1 Pro with 16 GB, macOS 27.0.1. Details and how each result was measured are in the
 [lab notes](notes/LAB-NOTES.md).
 
 | | Result |
 |---|---|
 | Steam | Valve's native ARM64 client in Big Picture under gamescope, in a Mac window at 2560x1440 (1 guest pixel per Retina pixel) |
 | Steam UI | ~50 fps while navigating, with Chromium's GPU compositing. Idle: host ~83 % CPU, ~3 GB RSS |
-| D3D11 | Banished (DXVK) at 60 fps (the display rate) at 2560x1440, menu and gameplay. Host ~62 % CPU, 3.2 GB RSS |
+| Setup | `bash setup.sh` from an empty cache in 21 minutes (fresh clone, 2026-11-09) |
+| D3D11 | Banished (DXVK) at 60 fps (the display rate) at 2560x1440 on Proton 11.0 (ARM64); Play → game window in ≤ 16 s |
 | D3D12 | vkd3d-proton v3.1 test suite: 544 of 588 tests without a failed check, stream output (transform feedback) included. InfraSpace (Unity, `-force-d3d12`) renders its menus |
 | Shared textures | Textures shared between Wine processes (D3DKMT) work: InfraSpace's Media Foundation intro video plays (D3D11 mode). Our own guest Venus driver + an MTLHeap-sharing virglrenderer patch |
+| Microphone | the Mac's default input reaches the guest (virtio-snd capture → PipeWire) |
+| Downloads | Steam downloads at the line's full rate (49–53 Mbit/s on a 50 Mbit/s line) |
+| Startup | a loader in the window shows the guest's boot stage until Steam's first frame |
 | Input | keyboard and absolute mouse (virtio-input); one cursor (gamescope's) |
 | Sound | virtio-snd → CoreAudio, PipeWire in the guest; plays on the Mac's default output |
 | Vulkan in the guest | Vulkan 1.4 with swapchain on the M1 Pro (Venus → KosmicKrisp → Metal) |
@@ -79,9 +84,7 @@ Fixes are local patches, listed in [NOTICE](NOTICE.md):
 
 - **D3D12:** some edge-case tests of the suite still fail: texture reinterpretation, border colours, tessellation edge cases, 16 KB suballocation alignment.
 - **Steam UI:** Valve's GL composer in the webhelper runs on llvmpipe (CPU).
-- **First game launch:** takes 1–2 minutes. x86 processes start slowly under FEX (Vulkan setup ~3.4 s each).
-- **Downloads:** Steam downloads through the VM's user-mode network (libslirp) reached 8–14 Mbit/s.
-- **Microphone:** capture is not implemented.
+- **Static game windows:** a launcher that draws only once can stay behind Steam's loading spinner; click into it or press a key.
 - **Anti-cheat:** games whose anti-cheat refuses VMs will not run.
 
 See the [changelog](CHANGELOG.md) for the release notes.
