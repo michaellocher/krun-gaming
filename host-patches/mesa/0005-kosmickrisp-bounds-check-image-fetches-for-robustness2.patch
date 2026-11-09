@@ -1,0 +1,178 @@
+From: krun-gaming
+Subject: [PATCH] kosmickrisp: bounds-check image fetches for robustImageAccess2 on all chips
+
+robustImageAccess2 requires a fetch outside the view (lod >= levels, or a
+coordinate including the array layer outside the size of that lod) to return
+zero. Metal clamps out-of-range array layers on every Apple GPU and lods on M5,
+and the existing lowering only rewrote the lod into an out-of-bounds coordinate
+and only ran on M5 (KK_WORKAROUND_16). Check every bound in the shader, read
+from a safe address and select zero out of bounds, for texel fetches and storage
+image loads, whenever the pipeline asks for robustImageAccess2.
+
+vkd3d-proton (D3D12 Load() on views with fewer layers/levels than the
+resource): test suite 544 -> 548 of 588 tests without a failed check,
+no newly failing test (all rwtex*_array_reinterpretation pass).
+---
+diff --git a/src/kosmickrisp/compiler/msl_nir_lower_common.c b/src/kosmickrisp/compiler/msl_nir_lower_common.c
+index 757af5c..2d31196 100644
+--- a/src/kosmickrisp/compiler/msl_nir_lower_common.c
++++ b/src/kosmickrisp/compiler/msl_nir_lower_common.c
+@@ -123,25 +123,26 @@ msl_nir_fs_force_output_signedness(
+                                      render_target_formats);
+ }
+ 
+-/* Used to weed out instructions where the lod is known to be 0.
+- * This is an optimization and avoids trying to instrument
+- * texel buffers, which won't work with the generated Metal code
+- * for the OOB lod workaround */
+-static bool
+-kk_src_is_const_zero(nir_src *src)
++/* robustImageAccess2: a fetch outside the view (lod >= levels, or any coordinate including the array layer
++ * outside the size of that lod) must return zero. Metal clamps the array layer and, depending on the GPU, the
++ * lod, so check the bounds in the shader: read from a safe in-bounds address and select zero when out of
++ * bounds. vkd3d-proton relies on this for D3D12 Load() on views with fewer layers/levels than the resource. */
++static nir_def *
++kk_robust_in_bounds(nir_builder *b, nir_def *coord, unsigned coord_comps, nir_def *size, nir_def *lod_ok)
+ {
+-   return nir_src_is_const(*src) && (nir_src_as_uint(*src) == 0);
++   nir_def *in_bounds = lod_ok;
++   for (unsigned i = 0; i < coord_comps; i++)
++      in_bounds = nir_iand(b, in_bounds, nir_ult(b, nir_channel(b, coord, i), nir_channel(b, size, i)));
++   return in_bounds;
+ }
+ 
+ static void
+-kk_lod_oob_fixup(nir_builder *b, nir_src *coord, nir_src *lod, nir_def *levels)
++kk_robust_select_zero(nir_builder *b, nir_def *def, nir_def *in_bounds)
+ {
+-   /* For chips (M5) that don't handle OOB LOD correctly, transform it into
+-    * a coordinate OOB, which is handled correctly */
+-   nir_def *oob = nir_uge(b, lod->ssa, levels);
+-   nir_def *def = nir_bcsel(b, oob, nir_imm_int(b, -1), coord->ssa);
+-
+-   nir_src_rewrite(coord, def);
++   b->cursor = nir_after_instr(nir_def_instr(def));
++   nir_def *zero = nir_imm_zero(b, def->num_components, def->bit_size);
++   nir_def *sel = nir_bcsel(b, in_bounds, def, zero);
++   nir_def_rewrite_uses_after(def, sel);
+ }
+ 
+ static bool
+@@ -152,29 +153,37 @@ kk_lower_robustness2_textures(nir_builder *b, nir_instr *instr,
+       return false;
+ 
+    nir_tex_instr *tex = nir_instr_as_tex(instr);
+-   if (tex->sampler_dim == GLSL_SAMPLER_DIM_BUF)
+-      return false;
+-   if ((tex->op != nir_texop_txf) && (tex->op != nir_texop_txf_ms))
++   if (tex->sampler_dim == GLSL_SAMPLER_DIM_BUF || tex->op != nir_texop_txf ||
++       tex->is_sparse)
+       return false;
+ 
+    int coord_index = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+    if (coord_index < 0)
+       return false;
+ 
+-   int lod_index = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+-   if (lod_index < 0)
+-      return false;
+-
+-   nir_src *lod = &tex->src[lod_index].src;
+-   if (!lod || kk_src_is_const_zero(lod))
+-      return false;
+-
+    b->cursor = nir_before_instr(instr);
++
++   int lod_index = nir_tex_instr_src_index(tex, nir_tex_src_lod);
++   nir_def *lod = lod_index >= 0 ? tex->src[lod_index].src.ssa : nir_imm_int(b, 0);
+    nir_def *levels = nir_build_texture_query(b, tex, nir_texop_query_levels, 1,
+                                              nir_type_uint32, false, false);
++   nir_def *lod_ok = nir_ult(b, lod, levels);
++   nir_def *safe_lod = nir_bcsel(b, lod_ok, lod, nir_imm_int(b, 0));
+ 
+-   kk_lod_oob_fixup(b, &tex->src[coord_index].src, lod, levels);
++   nir_def *size = nir_build_texture_query(b, tex, nir_texop_txs, tex->coord_components,
++                                           nir_type_uint32, false, true);
++   nir_tex_instr *txs = nir_instr_as_tex(nir_def_instr(size));
++   nir_src_rewrite(&txs->src[nir_tex_instr_src_index(txs, nir_tex_src_lod)].src, safe_lod);
+ 
++   nir_def *coord = tex->src[coord_index].src.ssa;
++   nir_def *in_bounds = kk_robust_in_bounds(b, coord, tex->coord_components, size, lod_ok);
++
++   nir_src_rewrite(&tex->src[coord_index].src,
++                   nir_bcsel(b, in_bounds, coord, nir_imm_zero(b, coord->num_components, coord->bit_size)));
++   if (lod_index >= 0)
++      nir_src_rewrite(&tex->src[lod_index].src, safe_lod);
++
++   kk_robust_select_zero(b, &tex->def, in_bounds);
+    return true;
+ }
+ 
+@@ -182,26 +191,34 @@ static bool
+ kk_lower_robustness2_intrinsics(nir_builder *b, nir_intrinsic_instr *intr,
+                                 UNUSED void *data)
+ {
+-   /* So far it doesn't seem like we need to fix up
+-    * nir_intrinsic_bindless_image_store, even though it could have an OOB lod. */
+-   if (intr->intrinsic != nir_intrinsic_bindless_image_load &&
+-       intr->intrinsic != nir_intrinsic_bindless_image_sparse_load)
++   /* Stores out of bounds are discarded by Metal; only loads need a defined result. */
++   if (intr->intrinsic != nir_intrinsic_bindless_image_load)
+       return false;
+ 
+-   nir_src *lod = &intr->src[3];
+-   if (!lod || kk_src_is_const_zero(lod))
++   enum glsl_sampler_dim dim = nir_intrinsic_image_dim(intr);
++   if (dim == GLSL_SAMPLER_DIM_BUF || dim == GLSL_SAMPLER_DIM_MS)
+       return false;
+ 
+    b->cursor = nir_before_instr(&intr->instr);
+ 
+-   nir_intrinsic_instr *levels_instr = nir_intrinsic_instr_create(
+-      b->shader, nir_intrinsic_bindless_image_levels);
+-   levels_instr->src[0] = intr->src[0];
+-   nir_def_init(&levels_instr->instr, &levels_instr->def, 1, 32);
+-   nir_builder_instr_insert(b, &levels_instr->instr);
++   unsigned comps = nir_image_intrinsic_coord_components(intr);
++   nir_def *handle = intr->src[0].ssa;
++   nir_def *lod = intr->src[3].ssa;
++   nir_def *levels = nir_bindless_image_levels(b, 32, handle, .image_dim = dim,
++                                               .image_array = nir_intrinsic_image_array(intr));
++   nir_def *lod_ok = nir_ult(b, lod, levels);
++   nir_def *safe_lod = nir_bcsel(b, lod_ok, lod, nir_imm_int(b, 0));
++   nir_def *size = nir_bindless_image_size(b, comps, 32, handle, safe_lod, .image_dim = dim,
++                                           .image_array = nir_intrinsic_image_array(intr));
++
++   nir_def *coord = intr->src[1].ssa;
++   nir_def *in_bounds = kk_robust_in_bounds(b, coord, comps, size, lod_ok);
+ 
+-   kk_lod_oob_fixup(b, &intr->src[1], lod, &levels_instr->def);
++   nir_src_rewrite(&intr->src[1],
++                   nir_bcsel(b, in_bounds, coord, nir_imm_zero(b, coord->num_components, coord->bit_size)));
++   nir_src_rewrite(&intr->src[3], safe_lod);
+ 
++   kk_robust_select_zero(b, &intr->def, in_bounds);
+    return true;
+ }
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index cac6733..205df1a 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -804,11 +804,11 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
+    NIR_PASS(_, nir, kk_nir_lower_descriptors, rs, set_layout_count,
+             set_layouts);
+ 
+-   /* KK_WORKAROUND_16 - must be called after kk_nir_lower_descriptors(), which
+-    * lowers all image intrinsics to be bindless */
+-   if (rs->images ==
+-          VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS_2 &&
+-       !(pdev->settings.disabled_workarounds & BITFIELD64_BIT(16)))
++   /* Must be called after kk_nir_lower_descriptors(), which lowers all image
++    * intrinsics to be bindless. Bounds-checks fetches on every chip: Metal
++    * clamps out-of-range array layers everywhere and out-of-range lods on M5
++    * (KK_WORKAROUND_16). */
++   if (rs->images == VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS_2)
+       NIR_PASS(_, nir, msl_lower_robustness2_images);
+ 
+    /* KK_WORKAROUND_18 */

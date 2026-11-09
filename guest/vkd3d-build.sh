@@ -7,13 +7,20 @@ exec > /out/build.txt 2>&1
 # TSI (--net): the host's resolver, passed as NAMESERVER (no ip tool in the builder for slirp's net-up.sh)
 printf 'nameserver %s\n' "${NAMESERVER:-1.1.1.1}" > /etc/resolv.conf
 TAG=${VKD3D_TAG:-v3.1}
-command -v meson glslangValidator git x86_64-w64-mingw32-widl > /dev/null ||
+# one check per tool: `command -v a b c` succeeds when any of them exists (the builder image has meson from
+# venus-build.sh, and widl was then missing)
+for tool in meson ninja glslangValidator git x86_64-w64-mingw32-widl; do
+  command -v "$tool" > /dev/null && continue
   dnf install -y --setopt=install_weak_deps=False meson ninja-build gcc-c++ glslang git mingw-w64-tools
+  break
+done
 # Fedora ships widl (IDL -> C headers) only with a mingw prefix; the 64-bit one generates the same headers here
 ln -sf "$(command -v x86_64-w64-mingw32-widl)" /usr/local/bin/widl
 SRC=/cache/vkd3d-proton-$TAG
 [ -d "$SRC" ] || git clone -q --recursive --depth 1 --shallow-submodules --branch "$TAG" \
   https://github.com/HansKristian-Work/vkd3d-proton.git "$SRC"
+# an interrupted clone leaves submodules half checked out (dxil-spirv without spirv-headers): complete them
+git -C "$SRC" submodule update -q --init --recursive --depth 1
 B=/root/vkd3d-build # ext4, not virtiofs: faster and no permission surprises
 meson setup --wipe "$B" "$SRC" --buildtype release --prefix /out -Denable_tests=true
 ninja -C "$B" install

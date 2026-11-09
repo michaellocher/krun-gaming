@@ -1,0 +1,37 @@
+From: krun-gaming
+Subject: [PATCH] kosmickrisp: no tessellation front-face flip when a geometry stage follows
+
+The tessellator already emits triangles in the requested winding (index swap for
+ccw / lower-left domain origin) and the front face is flipped once more for
+tessellated draws. With a geometry stage after tessellation (the application's
+or the transform feedback passthrough of 0004) the GS emits the rasterized
+primitives, so the extra flip inverted culling: D3D12 ccw-tessellated quads with
+stream output were drawn although back-facing.
+
+vkd3d-proton: test suite 548 -> 554 of 588 tests without a failed check (all
+six test_quad_tessellation* variants), no newly failing test.
+---
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index 89af618..7daab22 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -1425,9 +1425,17 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
+    }
+ 
+    if (IS_DIRTY(RS_FRONT_FACE) || IS_DIRTY(TS_DOMAIN_ORIGIN) ||
+-       IS_SHADER_DIRTY(TESS_CTRL) || IS_SHADER_DIRTY(TESS_EVAL)) {
++       IS_SHADER_DIRTY(VERTEX) || IS_SHADER_DIRTY(TESS_CTRL) ||
++       IS_SHADER_DIRTY(TESS_EVAL)) {
+       bool front_face_ccw = dyn->rs.front_face != VK_FRONT_FACE_CLOCKWISE;
+-      if (cmd->state.shaders[MESA_SHADER_TESS_EVAL]) {
++      /* A geometry stage after tessellation (the application's or the
++       * transform feedback passthrough) emits the rasterized primitives, so
++       * their winding is the GS's and the tessellation winding no longer
++       * applies to the front face. */
++      struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
++      bool has_gs = vs && (vs->info.vs.additional_stages_bits &
++                           BITFIELD_BIT(MESA_SHADER_GEOMETRY));
++      if (cmd->state.shaders[MESA_SHADER_TESS_EVAL] && !has_gs) {
+          front_face_ccw ^= gfx->tess.info.ccw;
+          front_face_ccw ^=
+             dyn->ts.domain_origin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
