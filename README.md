@@ -22,7 +22,7 @@ Measured 2026-11-08/09 on a MacBook Pro M1 Pro with 16 GB, macOS 27.0.1. Details
 | Steam UI | ~50 fps while navigating, with Chromium's GPU compositing. Idle: host ~83 % CPU, ~3 GB RSS |
 | Setup | `bash setup.sh` from an empty cache in 21 minutes (fresh clone, 2026-11-09) |
 | D3D11 | Banished (DXVK) at 60 fps (the display rate) at 2560x1440 on Proton 11.0 (ARM64); Play → game window in ≤ 16 s |
-| D3D12 | vkd3d-proton v3.1 test suite: 544 of 588 tests without a failed check, stream output (transform feedback) included. InfraSpace (Unity, `-force-d3d12`) renders its menus |
+| D3D12 | vkd3d-proton v3.1 test suite: 554 of 588 tests without a failed check, stream output (transform feedback) included. InfraSpace (Unity, `-force-d3d12`) renders its menus |
 | Shared textures | Textures shared between Wine processes (D3DKMT) work: InfraSpace's Media Foundation intro video plays (D3D11 mode). Our own guest Venus driver + an MTLHeap-sharing virglrenderer patch |
 | Microphone | the Mac's default input reaches the guest (virtio-snd capture → PipeWire) |
 | Downloads | Steam downloads at the line's full rate (49–53 Mbit/s on a 50 Mbit/s line) |

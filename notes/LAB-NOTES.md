@@ -18,7 +18,7 @@ Host: MacBook Pro M1 Pro, 16 GB, macOS 27.0.1. Everything lands in `~/.local/sha
 | Vulkan on the Mac GPU in the guest, swapchain, picture in a Mac window | **done**: Venus → KosmicKrisp → Metal, IOSurface window |
 | Steam (native ARM64 client) in Big Picture under **gamescope** | **done**: flicker fixed (gamescope 0001), network status via NetworkManager |
 | D3D9–11 games (Proton + DXVK) | **playable at 60 fps**: Banished (D3D11) at 2560x1440; since 2026-11-09 through Valve's Proton 11.0 (ARM64), see "Fresh install" |
-| D3D12 (vkd3d-proton) | **test suite: 544/588 without failures**, stream output captured (KK 0004); InfraSpace (Unity, `-force-d3d12`): menus and input work |
+| D3D12 (vkd3d-proton) | **test suite: 554/588 without failures**, stream output captured (KK 0004); InfraSpace (Unity, `-force-d3d12`): menus and input work |
 | Shared textures (D3DKMT, Media Foundation video) | **InfraSpace's intro video plays** (D3D11 mode; was black) — see "Shared textures" |
 | Input | keyboard + absolute mouse (gamescope 0002); mouse reached the game in a user session |
 | Audio | **works**: virtio-snd → CoreAudio (libkrun 0010) + PipeWire, heard on the Mac's default output (listening test, 2026-11-08) |
@@ -56,7 +56,12 @@ install:
 - Quirk: Banished's launcher (a static window) presented its only frame before gamescope switched focus to it and
   stayed behind Big Picture's spinner; gamescope's focus properties were right (`GAMESCOPE_FOCUSED_APP=242920`,
   `STEAM_OVERLAY=0`); it appeared after a click into it (or unmapping Big Picture). Continuously rendering windows
-  (the game itself, InfraSpace) were not affected.
+  (the game itself, InfraSpace) were not affected. Mechanism (gamescope 3.16.29 `steamcompmgr.cpp`): a focus change
+  sets `bPendingFade`, and until the new focus window has a done commit `paint_all` shows the held buffer of the
+  previous one (Big Picture) at full opacity; `paint_window` clears it only once the window has a `lastCommit`. The
+  launcher's single frame never became a done commit; the logged discard path (`waylandres but no win`) did not
+  occur, which leaves the debug-only ones ("commit not for current surface", "same buffer committed twice") — open,
+  needs a gamescope build with debug logging.
 - Microphone: `arecord -D default -f S16_LE -r 48000 -c 2 -d 5` in the guest: 240000 frames; RMS ~5 room noise,
   one second with speech at peak 903 / RMS 161 (macOS microphone permission granted).
 - Downloads: Steam's download page 49.3 Mbit/s steady, peak 52.7, on a 50 Mbit/s line (`content_log`:
@@ -212,6 +217,19 @@ VS-only capture). Suite: **544/588 tests without a failed check** (was 532), 12 
 `vertex_id`, `line_tessellation`, `tessellation_read_tesslevel`, ... that read results back via stream output), none
 newly failing.
 
+**Stage 3 (2026-11-09, `host-patches/mesa/0005`): robust image fetches** — `Load()` outside a view's layers or
+levels must return zero (`robustImageAccess2`); Metal clamped the array layer (and, per KosmicKrisp's
+KK_WORKAROUND_16, the lod on M5), and the existing lowering only ran on M5. 0005 bounds-checks fetches and storage
+image loads in the shader on every chip. Suite: **548/588** (was 544), failed checks 57,729 (was 64,264), none newly
+failing; all four `rwtex*_array_reinterpretation` pass, the four sampled `tex*` variants dropped from 1920 to 438
+failures each — what remains there reads level 0 when the shader's array type differs from the view's (open).
+
+`host-patches/mesa/0006`: tessellated triangles were culled with the wrong front face when a geometry stage
+follows (the transform feedback passthrough of 0004): the tessellator already emits the requested winding and the
+front face was flipped once more. Suite: **554/588**, all six `test_quad_tessellation*` pass, none newly failing
+(per-test counts unchanged except `uav_clear_exhaustive_descriptors` / `suballocate_va_alignment`, which vary
+between identical runs by ±200 / ±20 checks).
+
 Largest remaining failures: `uav_clear_exhaustive_descriptors` (45 k checks), suballocation alignment (16 KB pages
 pad small resources: more memory, no wrong pictures), texture-array reinterpretation, custom border colour limits,
 stream output (no XFB capture yet), line/quad tessellation edge cases. Still missing:
@@ -242,6 +260,11 @@ Steam as an ordinary X11 client — login screen stable in every presented frame
   surface size query returns `VK_ERROR_SURFACE_LOST_KHR` on a live window and the GPU process exits, so the UI
   presents by Mesa's X11 `sw` path. Measured: ~50 fps navigating (700 frames in ~13 s), `gpu_compositing: enabled`;
   remaining cost is Valve's "GL Composer" threads in the webhelper on llvmpipe (4 × ~82 %) and Xwayland (~64 %), per thread from `guest/thread-cpu.sh`.
+  GPU GL for that composer (2026-11-09, `/tmp/webhelper-env`): zink is the only GL driver on Venus. Valve's
+  `steamwebhelper.sh` prints "setting LIBGL_KOPPER_DISABLE=true for steamwebhelper to get store working properly";
+  without kopper zink needs DRI3 dma-buf (not in gamescope's Xwayland), and with `LIBGL_KOPPER_DISABLE=false`
+  forced the webhelper was restarted every ~10 s (taskset-wrapper log) — reverted, stable again. Baseline then:
+  llvmpipe 4 × 60–63 %, Xwayland 57 % while navigating.
 - Xorg needed kernel patch 0006: dumb buffers as guest blobs also with 3D. The Venus-only host has no GL
   renderer, so classic 2D resources fail (`RESOURCE_CREATE_2D` → `ERR_UNSPEC`).
 - Fast iterations without VM restarts: `guest-cmd.sh` (command channel into the running guest),

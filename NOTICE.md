@@ -24,9 +24,11 @@ Own patches (this project):
 | `guest-patches/mesa/0001` | Venus (guest driver, built from Mesa `c0235eff` by `guest/venus-build.sh`): allow optimal tiling for opaque-fd images, which 0004 backs on the host |
 | `kernel/patches/0005` | virtio-gpu: advertise and accept `DRM_FORMAT_MOD_LINEAR`, list ARGB8888 on the primary plane (unchanged in 7.4-rc1) |
 | `kernel/patches/0006` | virtio-gpu: dumb buffers as guest blobs also with 3D enabled (Xorg/modesetting scanout on libkrun) |
-| `host-patches/libkrun/0010` | virtio-snd: CoreAudio (AudioQueue) playback backend for macOS hosts; pipewire dependency Linux-only |
+| `host-patches/libkrun/0010` | virtio-snd: CoreAudio (AudioQueue) backend for macOS hosts, playback and capture; pipewire dependency Linux-only |
 | `host-patches/mesa/0002` | KosmicKrisp: `fillModeNonSolid` (wireframe) via Metal's triangle fill mode |
 | `host-patches/mesa/0003` | KosmicKrisp: D3D12 stage 1 — transform feedback entry points and query, single-texel buffer alignment, buffer views of unsupported formats |
 | `host-patches/mesa/0004` | KosmicKrisp: D3D12 stage 2 — transform feedback capture (port of Honeykrisp's on Mesa's poly GS emulation, passthrough GS for VS-only capture) |
+| `host-patches/mesa/0005` | KosmicKrisp: bounds-check texel fetches and storage image loads for `robustImageAccess2` on every chip (Metal clamps out-of-range array layers, and lods on M5) |
+| `host-patches/mesa/0006` | KosmicKrisp: no tessellation front-face flip when a geometry stage follows (culling of tessellated primitives with stream output) |
 | `guest-patches/gamescope/0001` | gamescope 3.16.29: refresh wl_shm textures on every commit (flicker with Xwayland without glamor) |
 | `guest-patches/gamescope/0002` | gamescope 3.16.29: absolute pointer motion (VM tablet-style mouse) |

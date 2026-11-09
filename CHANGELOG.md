@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.1.1 (2026-11-09)
+
+### Works (measured 2026-11-09, M1 Pro 16 GB)
+
+- **D3D12**: vkd3d-proton v3.1 test suite **554/588** without a failed check (was 544), no newly failing test:
+  - `host-patches/mesa/0005`: image fetches and storage image loads are bounds-checked for `robustImageAccess2` on
+    every chip (Metal clamps out-of-range array layers, and lods on M5) — 4 tests fixed, 4 more from 1920 to 438
+    failed checks.
+  - `host-patches/mesa/0006`: tessellated primitives followed by a geometry stage (stream output) are culled with
+    the right front face — all six `test_quad_tessellation*` pass.
+- Regression checks with 0005/0006 on Proton 11.0 (ARM64): Banished main menu correct at 60 fps (600 frames in
+  10 s); InfraSpace's intro video plays. The first start after the driver update compiles every shader again
+  (Banished: about two minutes without new frames, once).
+- `guest/vkd3d-build.sh` installs each missing tool (it skipped widl) and completes half-cloned submodules.
+
+### Known limits (changes)
+
+- D3D12, remaining 34 tests: API or hardware limits (8192 custom border colours with 5120 distinct values exceed
+  Metal's sampler table, as on AMD/Intel/Adreno; 16 KB pages pad small suballocations;
+  `VK_EXT_dynamic_rendering_unused_attachments`), and two larger driver changes (Texture2D/Texture2DArray access to
+  the same view reads level 0 on Metal; custom border colours ignore the view swizzle).
+- Steam UI composer on the GPU: zink is the only GL on Venus; Valve's `steamwebhelper.sh` sets
+  `LIBGL_KOPPER_DISABLE=true`, and zink without kopper needs DRI3 dma-buf, which gamescope's Xwayland lacks; with
+  kopper forced on, the webhelper does not come up within Steam's 10 s and is restarted in a loop. Stays on llvmpipe.
+- Static launcher behind the spinner: gamescope keeps showing Big Picture while the newly focused window has no done
+  commit (`bPendingFade` in `paint_all`); why the launcher's single frame never becomes one is open.
+
 ## 0.1.0 (2026-11-09)
 
 Windows games from Steam on an M1 Mac in a libkrun microVM: Fedora 44 guest, gamescope, Valve's ARM64 Steam client,
